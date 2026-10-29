@@ -1,0 +1,14 @@
+{
+  "crons": [
+    {
+      "path": "/api/watchdog/run",
+      "schedule": "0 2 * * *"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.py"
+    }
+  ]
+}

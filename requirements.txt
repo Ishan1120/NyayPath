@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pydantic
+anthropic
+python-dotenv
+reportlab
+groq
+httpx
+python-multipart
+supabase>=2.3.0
+requests
