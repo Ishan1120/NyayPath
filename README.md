@@ -318,7 +318,7 @@ Visit **`http://localhost:3000`** in your browser. All `/api/*` network requests
 
 Engineered with passion for open-access civic technology and administrative transparency.
 
-- **Developer**: Ishan Sharma
+- **Developer**: Ishan Bhati
 - **GitHub**: [@Ishan1120](https://github.com/Ishan1120)
 - **Repository**: [https://github.com/Ishan1120/NyayPath](https://github.com/Ishan1120/NyayPath)
 
