@@ -15,12 +15,21 @@ import json
 import base64
 import secrets
 import logging
+from pathlib import Path
 from enum import Enum
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel, EmailStr
 from fastapi import Request, HTTPException, status
 from fastapi.security import HTTPBearer
+from dotenv import load_dotenv
+
+# Ensure local .env is loaded whenever auth module is imported
+_root_env = Path(__file__).resolve().parent.parent / ".env"
+if _root_env.exists():
+    load_dotenv(dotenv_path=_root_env)
+else:
+    load_dotenv()
 
 logger = logging.getLogger(__name__)
 security_bearer = HTTPBearer(auto_error=False)
@@ -63,7 +72,7 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 
 # =====================================================================
-# Case Tracking HMAC Key (Phase 1.3.4 — removed hardcoded fallback)
+# Case Tracking HMAC Key (Phase 1.3.4 — Persistent Dev & Hex Validation)
 #
 # AUTH_SALT was ambiguously named and had a committed hardcoded fallback.
 # Renamed to CASE_TRACKING_HMAC_KEY; this key is used solely to salt
@@ -73,40 +82,104 @@ JWT_EXPIRATION_HOURS = 24
 # (hash_officer_password) generates its own random per-password salt
 # using secrets.token_hex(16) — no shared salt involved.
 #
-# Security behaviour:
-#   - Development: ephemeral 256-bit key generated per process if unset.
-#     This means tracking hashes change between restarts in dev, which
-#     is acceptable: SQLite records are ephemeral in local dev.
-#   - Production: CASE_TRACKING_HMAC_KEY must be explicitly configured.
-#     Any stored hash computed from a previous key becomes invalid on
-#     key rotation. Key rotation must be coordinated with a data migration.
+# Security & Persistence Rules (Task 2):
+#   - Key must decode to exactly 32 bytes (256 bits of cryptographic entropy).
+#   - Secret is NEVER printed in logs or exception messages.
+#   - Malformed keys fail safely with RuntimeError/ValueError.
+#   - In production: Missing key strictly halts startup.
+#   - In disposable test runs (TEST_MODE=1 or ENV=test): Ephemeral runtime key.
+#   - In normal local development: If missing, a random 256-bit key is
+#     generated ONCE and written to the Git-ignored .env file, remaining
+#     stable across application restarts.
+#   - Key Rotation Impact: Any stored hash computed with a prior key will
+#     fail verification upon key rotation. Rotating this key requires an
+#     explicit migration to re-hash verification credentials.
 # =====================================================================
 
+def validate_hmac_hex_key(key_str: str) -> str:
+    """
+    Validates that a configured CASE_TRACKING_HMAC_KEY string is a valid
+    hexadecimal string decoding to exactly 32 bytes (256 bits).
+    Fails safely with ValueError if invalid. Never prints secret in error messages.
+    """
+    if not key_str or not isinstance(key_str, str):
+        raise ValueError("CASE_TRACKING_HMAC_KEY is missing or empty.")
+    clean = key_str.strip()
+    if len(clean) != 64:
+        raise ValueError(
+            f"CASE_TRACKING_HMAC_KEY must be exactly 64 hexadecimal characters "
+            f"(32 bytes / 256 bits). Provided string length: {len(clean)}."
+        )
+    try:
+        raw_bytes = bytes.fromhex(clean)
+    except ValueError as e:
+        raise ValueError(
+            "CASE_TRACKING_HMAC_KEY is malformed: string contains non-hexadecimal characters."
+        ) from e
+    if len(raw_bytes) != 32:
+        raise ValueError(
+            f"CASE_TRACKING_HMAC_KEY did not decode to 32 bytes (decoded to {len(raw_bytes)} bytes)."
+        )
+    return clean
+
 def _init_case_tracking_hmac_key() -> str:
-    key = os.environ.get("CASE_TRACKING_HMAC_KEY")
+    raw_key = os.environ.get("CASE_TRACKING_HMAC_KEY")
     is_prod = (
         os.environ.get("ENVIRONMENT") == "production" or
         os.environ.get("NODE_ENV") == "production" or
         os.environ.get("ENV") == "production" or
         os.environ.get("VERCEL") == "1"
     )
-    if is_prod:
-        if not key or len(key) < 32:
+    is_disposable_test = (
+        os.environ.get("TEST_MODE") == "1" or
+        os.environ.get("ENV") == "test"
+    )
+
+    # 1. Configured Key in Environment
+    if raw_key:
+        try:
+            valid_key = validate_hmac_hex_key(raw_key)
+            return valid_key
+        except ValueError as e:
+            logger.error("Failed to validate configured CASE_TRACKING_HMAC_KEY.")
             raise RuntimeError(
-                "CRITICAL SECURITY CONFIGURATION ERROR: Production startup halted. "
-                "CASE_TRACKING_HMAC_KEY must be configured with at least 256 bits "
-                "(32+ chars) of entropy in production."
-            )
-        return key
-    if not key:
-        ephemeral = secrets.token_hex(32)
-        logger.warning(
-            "Notice: CASE_TRACKING_HMAC_KEY not set. Generated ephemeral 256-bit "
-            "runtime key for development. Existing stored hashes will not be verifiable "
-            "after process restart. Set CASE_TRACKING_HMAC_KEY in .env for persistence."
+                f"CRITICAL SECURITY CONFIGURATION ERROR: Malformed CASE_TRACKING_HMAC_KEY. {e}"
+            ) from e
+
+    # 2. Production Environment: Missing key halts startup
+    if is_prod:
+        raise RuntimeError(
+            "CRITICAL SECURITY CONFIGURATION ERROR: Production startup halted. "
+            "CASE_TRACKING_HMAC_KEY must be configured in environment with a 64-character "
+            "hexadecimal string (32 bytes / 256 bits)."
         )
+
+    # 3. Explicitly Disposable Test Mode: Ephemeral key (never written to .env)
+    if is_disposable_test:
+        ephemeral = secrets.token_hex(32)
+        logger.info("Notice: Disposable test mode active. Generated ephemeral 256-bit runtime HMAC key.")
         return ephemeral
-    return key
+
+    # 4. Normal Local Development: Generate once & persist to Git-ignored .env
+    root_env = Path(__file__).resolve().parent.parent / ".env"
+    generated_key = secrets.token_hex(32)
+    try:
+        if root_env.exists():
+            with open(root_env, "a", encoding="utf-8") as f:
+                f.write(f"\n# Persistent development secret for grievance tracking HMAC\nCASE_TRACKING_HMAC_KEY={generated_key}\n")
+        else:
+            with open(root_env, "w", encoding="utf-8") as f:
+                f.write(f"# Persistent development secret for grievance tracking HMAC\nCASE_TRACKING_HMAC_KEY={generated_key}\n")
+        os.environ["CASE_TRACKING_HMAC_KEY"] = generated_key
+        logger.warning(
+            "Notice: CASE_TRACKING_HMAC_KEY was not configured in .env. Generated a persistent "
+            "256-bit key and saved it to the local .env file. The key will remain stable across future restarts."
+        )
+        return generated_key
+    except Exception as e:
+        logger.error(f"Could not persist CASE_TRACKING_HMAC_KEY to .env: {e}")
+        os.environ["CASE_TRACKING_HMAC_KEY"] = generated_key
+        return generated_key
 
 CASE_TRACKING_HMAC_KEY = _init_case_tracking_hmac_key()
 

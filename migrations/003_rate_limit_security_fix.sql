@@ -86,13 +86,24 @@ GRANT SELECT, INSERT, UPDATE, DELETE
 -- reach this table regardless of any RLS policy configuration.
 
 -- =====================================================================
--- 5. HARDEN cleanup_stale_rate_limits() (in migration 002)
+-- 5. MOVE cleanup_stale_rate_limits() TO NON-EXPOSED private SCHEMA
 -- =====================================================================
--- The function in migration 002 lacked SET search_path = '', creating
--- a search-path injection vector. Replace it with a hardened version.
--- Also restrict EXECUTE to service_role only (no direct HTTP RPC).
+-- The function in migration 002 was placed in the public schema and lacked
+-- SET search_path = ''. Moving it into an internal 'private' schema ensures
+-- PostgREST never surfaces it in its public HTTP RPC registry.
+-- Explicitly revoking EXECUTE from anon and authenticated eliminates
+-- any possibility of client-triggered rate-limiter maintenance.
 
-CREATE OR REPLACE FUNCTION public.cleanup_stale_rate_limits()
+CREATE SCHEMA IF NOT EXISTS private;
+REVOKE ALL PRIVILEGES ON SCHEMA private FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SCHEMA private FROM anon;
+REVOKE ALL PRIVILEGES ON SCHEMA private FROM authenticated;
+GRANT USAGE ON SCHEMA private TO service_role;
+
+-- Drop legacy public function from migration 002
+DROP FUNCTION IF EXISTS public.cleanup_stale_rate_limits();
+
+CREATE OR REPLACE FUNCTION private.cleanup_stale_rate_limits()
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -105,11 +116,9 @@ BEGIN
 END;
 $$;
 
--- Revoke direct EXECUTE from any caller that might invoke via PostgREST RPC
-REVOKE EXECUTE ON FUNCTION public.cleanup_stale_rate_limits() FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.cleanup_stale_rate_limits() FROM anon;
-REVOKE EXECUTE ON FUNCTION public.cleanup_stale_rate_limits() FROM authenticated;
-GRANT EXECUTE ON FUNCTION public.cleanup_stale_rate_limits() TO service_role;
+-- Restrict execution exclusively to service_role
+REVOKE EXECUTE ON FUNCTION private.cleanup_stale_rate_limits() FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.cleanup_stale_rate_limits() TO service_role;
 
 -- =====================================================================
 -- 6. HARDEN verify_student_grievance_access() (in migration 002)
