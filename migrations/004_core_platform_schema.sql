@@ -109,22 +109,71 @@ BEGIN
     END IF;
 END $$;
 
--- Automatic trigger to synchronize campus grievance insertions into parent cases entity
+-- Automatic function to synchronize campus grievance insertions and updates into parent cases entity
 CREATE OR REPLACE FUNCTION private.sync_campus_case_parent()
 RETURNS TRIGGER AS $$
 BEGIN
-    INSERT INTO public.cases (id, case_id, case_type, status, tracking_key_hash, key_version, created_at, updated_at)
-    VALUES (NEW.id, NEW.case_id, 'CAMPUS_GRIEVANCE', NEW.status, NEW.verification_key_hash, NEW.key_version, NEW.created_at, NEW.updated_at)
-    ON CONFLICT (case_id) DO UPDATE SET
-        status = EXCLUDED.status,
-        updated_at = EXCLUDED.updated_at;
+    -- Prevent recursive trigger loop
+    IF pg_trigger_depth() > 1 THEN
+        RETURN NEW;
+    END IF;
+
+    IF TG_OP = 'INSERT' THEN
+        -- Insert parent row into public.cases
+        -- Ensures parent exists before campus_cases foreign key check commits
+        INSERT INTO public.cases (
+            id,
+            case_id,
+            case_type,
+            status,
+            tracking_key_hash,
+            key_version,
+            created_at,
+            updated_at
+        ) VALUES (
+            NEW.id,
+            NEW.case_id,
+            'CAMPUS_GRIEVANCE',
+            NEW.status,
+            NEW.verification_key_hash,
+            NEW.key_version,
+            NEW.created_at,
+            NEW.updated_at
+        )
+        ON CONFLICT (case_id) DO UPDATE SET
+            status = EXCLUDED.status,
+            tracking_key_hash = EXCLUDED.tracking_key_hash,
+            key_version = EXCLUDED.key_version,
+            updated_at = EXCLUDED.updated_at
+        WHERE public.cases.id = NEW.id; -- STRICT: Never allows altering parent UUID!
+
+        RETURN NEW;
+
+    ELSIF TG_OP = 'UPDATE' THEN
+        -- Keep parent cases synchronized when status, key, or timestamp updates
+        UPDATE public.cases
+        SET
+            status = NEW.status,
+            tracking_key_hash = NEW.verification_key_hash,
+            key_version = NEW.key_version,
+            updated_at = NEW.updated_at
+        WHERE id = NEW.id;
+
+        RETURN NEW;
+    END IF;
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
-DROP TRIGGER IF EXISTS trg_sync_campus_case_parent ON public.campus_cases;
-CREATE TRIGGER trg_sync_campus_case_parent
+DROP TRIGGER IF EXISTS trg_sync_campus_case_insert ON public.campus_cases;
+CREATE TRIGGER trg_sync_campus_case_insert
     BEFORE INSERT ON public.campus_cases
+    FOR EACH ROW EXECUTE FUNCTION private.sync_campus_case_parent();
+
+DROP TRIGGER IF EXISTS trg_sync_campus_case_update ON public.campus_cases;
+CREATE TRIGGER trg_sync_campus_case_update
+    AFTER UPDATE OF status, verification_key_hash, key_version, updated_at ON public.campus_cases
     FOR EACH ROW EXECUTE FUNCTION private.sync_campus_case_parent();
 
 -- =====================================================================
@@ -503,3 +552,40 @@ CREATE POLICY "Users can manage own saved research"
     TO authenticated
     USING (user_id = auth.uid())
     WITH CHECK (user_id = auth.uid());
+
+-- =====================================================================
+-- 14. PRIVATE STORAGE BUCKET FOR CASE DOCUMENTS (Task 3 & 8)
+-- =====================================================================
+-- Idempotently creates private bucket 'case_documents' if Supabase storage schema exists
+
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'storage') THEN
+        INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+        VALUES (
+            'case_documents',
+            'case_documents',
+            FALSE, -- Private bucket
+            10485760, -- 10MB maximum file size limit
+            ARRAY['application/pdf', 'image/jpeg', 'image/png']
+        )
+        ON CONFLICT (id) DO UPDATE SET
+            public = FALSE,
+            file_size_limit = 10485760;
+
+        -- Authenticated users can view authorized attachments
+        DROP POLICY IF EXISTS "Authenticated users view case attachments" ON storage.objects;
+        CREATE POLICY "Authenticated users view case attachments"
+            ON storage.objects FOR SELECT
+            TO authenticated
+            USING (bucket_id = 'case_documents');
+
+        -- Backend service_role manages attachments
+        DROP POLICY IF EXISTS "Service role manages case attachments" ON storage.objects;
+        CREATE POLICY "Service role manages case attachments"
+            ON storage.objects FOR ALL
+            TO service_role
+            USING (bucket_id = 'case_documents')
+            WITH CHECK (bucket_id = 'case_documents');
+    END IF;
+END $$;

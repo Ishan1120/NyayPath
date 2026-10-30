@@ -1262,8 +1262,17 @@ assert "fk_campus_cases_parent" in mig_004_sql, (
 assert "FOREIGN KEY (id) REFERENCES public.cases(id) ON DELETE RESTRICT" in mig_004_sql, (
     "campus_cases(id) must enforce foreign key to public.cases(id) with ON DELETE RESTRICT"
 )
-assert "CREATE TRIGGER trg_sync_campus_case_parent" in mig_004_sql, (
-    "Migration 004 must attach trg_sync_campus_case_parent trigger"
+assert "CREATE TRIGGER trg_sync_campus_case_insert" in mig_004_sql, (
+    "Migration 004 must attach trg_sync_campus_case_insert trigger"
+)
+assert "CREATE TRIGGER trg_sync_campus_case_update" in mig_004_sql, (
+    "Migration 004 must attach trg_sync_campus_case_update trigger"
+)
+assert "pg_trigger_depth() > 1" in mig_004_sql, (
+    "sync_campus_case_parent must prevent recursive trigger execution"
+)
+assert "'CAMPUS_GRIEVANCE'" in mig_004_sql, (
+    "public.cases case_type check constraint must permit CAMPUS_GRIEVANCE"
 )
 assert "private.sync_campus_case_parent()" in mig_004_sql, (
     "sync_campus_case_parent function must synchronize campus records into parent cases table"
@@ -1322,6 +1331,11 @@ assert "SUPABASE_KEY" not in auth_code, "api/auth.py must not reference legacy g
 case_mgr_code = (ROOT_DIR / "api" / "case_manager.py").read_text(encoding="utf-8")
 assert "SUPABASE_SECRET_KEY" in case_mgr_code, "api/case_manager.py must use SUPABASE_SECRET_KEY"
 print("  [PASS] [Unit/Static] Preferred Supabase environment variable naming strictly adhered to.")
+
+print("[Test 17.7] [Static DDL Audit] Full migration 001-004 linear dependency & AST validation (Task 5)")
+from tests.test_sql_validation import validate_all_migrations
+validate_all_migrations()
+print("  [PASS] [Static DDL Audit] End-to-end SQL migration sequence validated without dependency conflicts.")
 
 
 print("\n" + "=" * 70)
