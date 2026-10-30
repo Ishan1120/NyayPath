@@ -222,22 +222,38 @@ class CaseManager:
                 "filing_date": datetime.now(timezone.utc).isoformat()
             }
 
+        # Preserve the immutable internal UUID across all updates
+        original_uuid = current_data.get("internal_uuid")
+        if not original_uuid:
+            original_uuid = str(uuid.uuid4())
+            current_data["internal_uuid"] = original_uuid
+
         current_data.update(updates)
+        # Ensure that primary identifiers cannot be overwritten by updates payload
         current_data["id"] = clean_id
+        current_data["internal_uuid"] = original_uuid
 
         if self.use_supabase:
             try:
-                record = {
-                    "case_id": clean_id,
+                # Explicit UPDATE targeting case_id ensures primary key 'id' is NEVER updated
+                res = self.supabase.table("cases").update({
                     "data": current_data,
                     "tracking_key_hash": current_data.get("tracking_key_hash"),
                     "key_version": current_data.get("key_version", "v1")
-                }
-                if current_data.get("internal_uuid"):
-                    record["id"] = current_data["internal_uuid"]
-                self.supabase.table("cases").upsert(record, on_conflict="case_id").execute()
+                }).eq("case_id", clean_id).execute()
+
+                # If no existing record in database, insert with preserved UUID
+                if not res.data:
+                    self.supabase.table("cases").insert({
+                        "id": original_uuid,
+                        "case_id": clean_id,
+                        "data": current_data,
+                        "tracking_key_hash": current_data.get("tracking_key_hash"),
+                        "key_version": current_data.get("key_version", "v1"),
+                        "case_type": current_data.get("case_type", "RTI")
+                    }).execute()
             except Exception as e:
-                logger.error(f"Supabase UPSERT Error on Update for case {clean_id}: {e}")
+                logger.error(f"Supabase update error for case {clean_id}: {e}")
                 raise RuntimeError(f"Failed to update case in database: {e}") from e
         else:
             self._memory_cases[clean_id] = current_data

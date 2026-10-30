@@ -1221,7 +1221,111 @@ for tbl in all_required_tables:
 print("  [PASS] [Static SQL Inspection] All 12 platform tables defined across the authoritative migration manifest.")
 
 
+# =====================================================================
+# SECTION 17: PHASE 1.3.6 ARCHITECTURE & REGRESSION AUDIT (TASK 9)
+# =====================================================================
+print("\n--- SECTION 17: UNIFIED RELATIONAL ARCHITECTURE & REGRESSION AUDIT [Phase 1.3.6] ---")
+
+print("[Test 17.1] [Unit/Regression] UUID preservation during case updates (Task 2)")
+# Create a new case and record its immutable internal UUID
+reg_case_id = case_manager.create_case(life_liberty=False)
+reg_initial = case_manager.get_case(reg_case_id)
+assert reg_initial is not None
+original_uuid = reg_initial.get("internal_uuid")
+assert original_uuid is not None, "Case must have an internal_uuid"
+
+# Attempt to update the case with status changes AND a spoofed internal_uuid
+malicious_spoofed_uuid = "00000000-0000-0000-0000-000000000000"
+updated_case = case_manager.update_case(reg_case_id, {
+    "status": "FIRST_APPEAL_FILED",
+    "internal_uuid": malicious_spoofed_uuid,
+    "custom_field": "verified_content"
+})
+# The returned payload and stored case MUST retain the original UUID
+assert updated_case["internal_uuid"] == original_uuid, (
+    f"Regression: Case update allowed mutation of internal UUID! Expected {original_uuid}, got {updated_case['internal_uuid']}"
+)
+assert updated_case["status"] == "FIRST_APPEAL_FILED"
+
+# Fetch afresh to verify persistent storage state
+re_fetched = case_manager.get_case(reg_case_id)
+assert re_fetched["internal_uuid"] == original_uuid, (
+    "Regression: Stored case internal UUID was altered during update!"
+)
+print("  [PASS] [Unit/Regression] Case internal UUID is strictly immutable across updates; spoofed UUIDs rejected.")
+
+print("[Test 17.2] [Static SQL Inspection] Enforceable Foreign Keys linking campus_cases to parent cases (Task 1 & 3)")
+mig_004_sql = (ROOT_DIR / "migrations" / "004_core_platform_schema.sql").read_text(encoding="utf-8")
+assert "fk_campus_cases_parent" in mig_004_sql, (
+    "Migration 004 must define foreign key constraint 'fk_campus_cases_parent'"
+)
+assert "FOREIGN KEY (id) REFERENCES public.cases(id) ON DELETE RESTRICT" in mig_004_sql, (
+    "campus_cases(id) must enforce foreign key to public.cases(id) with ON DELETE RESTRICT"
+)
+assert "CREATE TRIGGER trg_sync_campus_case_parent" in mig_004_sql, (
+    "Migration 004 must attach trg_sync_campus_case_parent trigger"
+)
+assert "private.sync_campus_case_parent()" in mig_004_sql, (
+    "sync_campus_case_parent function must synchronize campus records into parent cases table"
+)
+print("  [PASS] [Static SQL Inspection] Campus cases are strictly linked to parent cases via enforceable FK and sync trigger.")
+
+print("[Test 17.3] [Static SQL Inspection] Audit log deletion conflict resolved with ON DELETE RESTRICT (Task 4)")
+# Ensure case_activity_log avoids ON DELETE SET NULL which conflicts with the immutability trigger
+assert "case_uuid UUID NOT NULL REFERENCES public.cases(id) ON DELETE RESTRICT" in mig_004_sql, (
+    "case_activity_log.case_uuid must use ON DELETE RESTRICT to prevent trigger conflict"
+)
+assert "actor_id UUID REFERENCES auth.users(id) ON DELETE RESTRICT" in mig_004_sql, (
+    "case_activity_log.actor_id must use ON DELETE RESTRICT to prevent trigger conflict"
+)
+assert "ON DELETE SET NULL" not in mig_004_sql.split("public.case_activity_log")[1].split(");")[0], (
+    "case_activity_log must NOT use ON DELETE SET NULL"
+)
+print("  [PASS] [Static SQL Inspection] Audit log foreign keys use ON DELETE RESTRICT; zero deletion/update conflict.")
+
+print("[Test 17.4] [Static SQL Inspection] Audit log read isolation for case owners, officers & admins (Task 4)")
+audit_policy_section = mig_004_sql.split("CREATE POLICY \"Officers and users can view authorized activity logs\"")[1].split(";")[0]
+assert "private.is_platform_admin()" in audit_policy_section, (
+    "Audit log policy must permit platform admins"
+)
+assert "actor_id = auth.uid()" in audit_policy_section, (
+    "Audit log policy must permit actor to view own actions"
+)
+assert "private.can_officer_access_case(cc.institution_id)" in audit_policy_section, (
+    "Audit log policy must permit only authorized institutional officers"
+)
+print("  [PASS] [Static SQL Inspection] Audit log SELECT policy enforces institutional and actor boundaries.")
+
+print("[Test 17.5] [Static SQL Inspection] Client Privilege Escalation Prevention on Profiles (Task 6)")
+profile_trigger_section = mig_004_sql.split("CREATE OR REPLACE FUNCTION private.enforce_profile_immutability()")[1].split("$$ LANGUAGE")[0]
+assert "NEW.role IS DISTINCT FROM OLD.role" in profile_trigger_section, (
+    "Profile trigger must block modifications to 'role'"
+)
+assert "NEW.is_verified IS DISTINCT FROM OLD.is_verified" in profile_trigger_section, (
+    "Profile trigger must block modifications to 'is_verified'"
+)
+assert "NEW.account_status IS DISTINCT FROM OLD.account_status" in profile_trigger_section, (
+    "Profile trigger must block modifications to 'account_status'"
+)
+assert "NEW.id IS DISTINCT FROM OLD.id" in profile_trigger_section, (
+    "Profile trigger must block modifications to 'id'"
+)
+print("  [PASS] [Static SQL Inspection] Profiles immutability trigger blocks role, verification, status, and ID modification.")
+
+print("[Test 17.6] [Unit/Static] Preferred Supabase API Key naming validation (Task 7)")
+import api.auth as _auth_module
+# Verify code reads preferred SUPABASE_PUBLISHABLE_KEY and SUPABASE_SECRET_KEY
+auth_code = (ROOT_DIR / "api" / "auth.py").read_text(encoding="utf-8")
+assert "SUPABASE_PUBLISHABLE_KEY" in auth_code, "api/auth.py must use SUPABASE_PUBLISHABLE_KEY"
+assert "SUPABASE_KEY" not in auth_code, "api/auth.py must not reference legacy generic SUPABASE_KEY"
+
+case_mgr_code = (ROOT_DIR / "api" / "case_manager.py").read_text(encoding="utf-8")
+assert "SUPABASE_SECRET_KEY" in case_mgr_code, "api/case_manager.py must use SUPABASE_SECRET_KEY"
+print("  [PASS] [Unit/Static] Preferred Supabase environment variable naming strictly adhered to.")
+
+
 print("\n" + "=" * 70)
-print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 TESTS COMPLETED SUCCESSFULLY!")
+print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 TESTS COMPLETED SUCCESSFULLY!")
 print("=" * 70 + "\n")
+
 
