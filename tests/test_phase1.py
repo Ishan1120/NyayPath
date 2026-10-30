@@ -48,6 +48,16 @@ from api.auth import (
 from api.campus_proctor import CampusProctorManager, campus_proctor_manager
 from api.rate_limiter import rate_limiter
 
+# Clear any rate limit entries from previous test runs so test execution is deterministic
+try:
+    import sqlite3
+    _conn = sqlite3.connect("campus_cases_persistent.db")
+    _conn.execute("DELETE FROM rate_limit_attempts")
+    _conn.commit()
+    _conn.close()
+except Exception:
+    pass
+
 client = TestClient(app)
 
 print("\n" + "=" * 70)
