@@ -121,38 +121,45 @@ REVOKE EXECUTE ON FUNCTION private.cleanup_stale_rate_limits() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION private.cleanup_stale_rate_limits() TO service_role;
 
 -- =====================================================================
--- 6. HARDEN verify_student_grievance_access() (in migration 002)
+-- 6. REMOVE PUBLIC TRACKING RPC & ISOLATE IN private SCHEMA (Task 2)
 -- =====================================================================
--- This SECURITY DEFINER function also lacked SET search_path = ''.
--- It is callable via PostgREST RPC by anon (for student tracking),
--- which is intentional. However, the search_path hardening is required.
+-- Migration 002 exposed public.verify_student_grievance_access() to anon
+-- and authenticated roles via PostgREST HTTP RPC. This allowed browser
+-- clients to invoke direct RPC endpoints without rate limiting.
+--
+-- Secure remediation:
+--   - Revoke EXECUTE from PUBLIC, anon, and authenticated.
+--   - Drop the function from public schema so PostgREST RPC cannot expose it.
+--   - Move internal verification functionality into non-exposed 'private' schema.
+--   - Student tracking verification is strictly enforced through FastAPI,
+--     which enforces persistent rate limiting BEFORE querying the database.
 
-CREATE OR REPLACE FUNCTION public.verify_student_grievance_access(
+DROP FUNCTION IF EXISTS public.verify_student_grievance_access(TEXT, TEXT);
+
+CREATE OR REPLACE FUNCTION private.verify_case_tracking(
     p_case_id TEXT,
     p_verification_key_hash TEXT
 )
-RETURNS SETOF public.campus_cases
+RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
 AS $$
 BEGIN
-    RETURN QUERY
-    SELECT *
-    FROM public.campus_cases
-    WHERE case_id = p_case_id
-      AND verification_key_hash = p_verification_key_hash
-    LIMIT 1;
+    RETURN EXISTS (
+        SELECT 1
+        FROM public.campus_cases
+        WHERE case_id = p_case_id
+          AND verification_key_hash = p_verification_key_hash
+    );
 END;
 $$;
 
--- Explicit grants: anon and authenticated may call this function.
--- The function itself enforces the case_id + hash verification.
--- It must NOT return results for wrong keys (WHERE clause enforces this).
-REVOKE EXECUTE ON FUNCTION public.verify_student_grievance_access(TEXT, TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.verify_student_grievance_access(TEXT, TEXT) TO anon;
-GRANT EXECUTE ON FUNCTION public.verify_student_grievance_access(TEXT, TEXT) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.verify_student_grievance_access(TEXT, TEXT) TO service_role;
+-- Restrict execution exclusively to service_role (backend only)
+REVOKE ALL PRIVILEGES ON FUNCTION private.verify_case_tracking(TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON FUNCTION private.verify_case_tracking(TEXT, TEXT) FROM anon;
+REVOKE ALL PRIVILEGES ON FUNCTION private.verify_case_tracking(TEXT, TEXT) FROM authenticated;
+GRANT EXECUTE ON FUNCTION private.verify_case_tracking(TEXT, TEXT) TO service_role;
 
 
 -- =====================================================================

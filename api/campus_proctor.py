@@ -167,11 +167,16 @@ class CampusProctorManager:
                 assigned_committee TEXT,
                 supporting_documents TEXT NOT NULL DEFAULT '[]',
                 verification_key_hash TEXT NOT NULL,
+                key_version TEXT NOT NULL DEFAULT 'v1',
                 history TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
             """)
+            try:
+                cursor.execute("ALTER TABLE campus_cases ADD COLUMN key_version TEXT NOT NULL DEFAULT 'v1';")
+            except Exception:
+                pass
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_campus_case_id ON campus_cases(case_id);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_campus_institution ON campus_cases(institution_id);")
             conn.commit()
@@ -277,6 +282,7 @@ class CampusProctorManager:
             "assigned_committee": None,
             "supporting_documents": payload.supporting_documents or [],
             "verification_key_hash": verification_hash,
+            "key_version": "v1",
             "history": initial_history,
             "created_at": now_iso,
             "updated_at": now_iso
@@ -321,7 +327,14 @@ class CampusProctorManager:
         """
         clean_id = (case_id or "").strip().upper()
         case = self._fetch_raw_case(clean_id)
+
+        # Uniform error message prevents Case ID enumeration attacks (Task 2)
         if not case:
+            if verification_key:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Invalid Case ID or Verification Key."
+                )
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Grievance not found. Please verify the Case ID."
@@ -334,18 +347,22 @@ class CampusProctorManager:
         if student_user and case.get("student_user_id") and case["student_user_id"] == student_user.user_id:
             authorized = True
 
-        # Mode B: High-entropy verification credential supplied
-        if verification_key and verify_tracking_credential(verification_key, case.get("verification_key_hash", "")):
-            authorized = True
+        # Mode B: High-entropy verification credential supplied (versioned HMAC-SHA256)
+        if verification_key:
+            rec_version = case.get("key_version", "v1")
+            if verify_tracking_credential(verification_key, case.get("verification_key_hash", ""), key_version=rec_version):
+                authorized = True
 
         if not authorized:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: Case ID alone is insufficient to view private grievance details. Please provide your secret Verification Key."
+                detail="Access denied: Invalid Case ID or Verification Key."
             )
 
+        # Return only minimum necessary case information to student
         sanitized = dict(case)
         sanitized.pop("verification_key_hash", None)
+        sanitized.pop("key_version", None)
         return sanitized
 
     # -----------------------------------------------------------------
@@ -525,8 +542,8 @@ Campus Grievance Redressal Committee (SGRC)
                 is_anonymous, confidentiality_mode, severity, status, proctor_notes,
                 hearing_date, action_taken, resolution_details, resolution_deadline,
                 assigned_proctor, assigned_committee, supporting_documents,
-                verification_key_hash, history, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                verification_key_hash, key_version, history, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, (
             r["id"], r["case_id"], r["institution_id"], r["student_user_id"], r["student_name"],
             r["roll_number"], r["department"], r["year"], r["category"], r["subject"],
@@ -535,7 +552,7 @@ Campus Grievance Redressal Committee (SGRC)
             r["hearing_date"], r["action_taken"], r["resolution_details"],
             r["resolution_deadline"], r["assigned_proctor"], r["assigned_committee"],
             json.dumps(r["supporting_documents"]), r["verification_key_hash"],
-            json.dumps(r["history"]), r["created_at"], r["updated_at"]
+            r.get("key_version", "v1"), json.dumps(r["history"]), r["created_at"], r["updated_at"]
         ))
         conn.commit()
         conn.close()

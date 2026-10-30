@@ -6,6 +6,19 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 
 try:
+    from .auth import (
+        generate_citizen_tracking_key,
+        hash_verification_key,
+        verify_tracking_credential
+    )
+except ImportError:
+    from auth import (
+        generate_citizen_tracking_key,
+        hash_verification_key,
+        verify_tracking_credential
+    )
+
+try:
     from supabase import create_client, Client
 except ImportError:
     create_client, Client = None, None
@@ -39,7 +52,7 @@ class CaseManager:
         chars = string.ascii_uppercase + string.digits
         return f"CR-{''.join(random.choices(chars, k=4))}-{''.join(random.choices(chars, k=4))}"
 
-    def create_case(self, life_liberty: bool = False) -> str:
+    def create_case(self, life_liberty: bool = False, tracking_credential: Optional[str] = None) -> str:
         case_id = self._generate_case_id()
         now_dt = datetime.now(timezone.utc)
         now_iso = now_dt.isoformat()
@@ -86,6 +99,8 @@ class CaseManager:
             "response_received_at": None,
             "first_appeal_date": None,
             "first_appeal_decision_date": None,
+            "tracking_key_hash": hash_verification_key(tracking_credential or generate_citizen_tracking_key(), version="v1"),
+            "key_version": "v1",
         }
 
         if self.use_supabase:
@@ -98,6 +113,37 @@ class CaseManager:
             self._memory_cases[case_id] = initial_data
 
         return case_id
+
+    def create_case_with_tracking(self, life_liberty: bool = False) -> Dict[str, str]:
+        """
+        Creates a new citizen case and returns both the public Case ID
+        and the high-entropy 128-bit private tracking credential.
+        Only the HMAC-SHA256 hash of the tracking credential is persisted.
+        """
+        cred = generate_citizen_tracking_key()
+        case_id = self.create_case(life_liberty=life_liberty, tracking_credential=cred)
+        return {"case_id": case_id, "tracking_key": cred}
+
+    def get_case_for_citizen(self, case_id: str, tracking_credential: str) -> Optional[Dict[str, Any]]:
+        """
+        Securely retrieves a citizen case verifying both the Case ID and
+        the 128-bit tracking credential using constant-time HMAC-SHA256.
+        Never returns the stored hash to the caller.
+        """
+        if not case_id or not tracking_credential:
+            return None
+        case = self.get_case(case_id)
+        if not case:
+            return None
+        stored_hash = case.get("tracking_key_hash")
+        if not stored_hash:
+            return case
+        key_ver = case.get("key_version", "v1")
+        if not verify_tracking_credential(tracking_credential, stored_hash, key_version=key_ver):
+            return None
+        sanitized = dict(case)
+        sanitized.pop("tracking_key_hash", None)
+        return sanitized
 
     def get_case(self, case_id: str) -> Optional[Dict[str, Any]]:
         if not case_id:
