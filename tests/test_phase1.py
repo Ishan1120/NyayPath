@@ -1344,8 +1344,59 @@ validate_all_migrations()
 print("  [PASS] [Static DDL Audit] End-to-end SQL migration sequence validated without dependency conflicts.")
 
 
+# =====================================================================
+# SECTION 18: PHASE 1.3.7 AUTHORITATIVE PARENT & ZERO-SEED AUDIT
+# =====================================================================
+print("\n--- SECTION 18: AUTHORITATIVE PARENT CASE & ZERO SEED AUDIT [Phase 1.3.7] ---")
+
+print("[Test 18.1] [Static SQL Inspection] Authoritative Parent-to-Child Status Sync Trigger (Task 1)")
+mig_004_sql = (ROOT_DIR / "migrations" / "004_core_platform_schema.sql").read_text(encoding="utf-8")
+assert "CREATE TRIGGER trg_sync_parent_case_update" in mig_004_sql, (
+    "Migration 004 must attach trg_sync_parent_case_update trigger on public.cases"
+)
+assert "private.sync_parent_case_to_campus()" in mig_004_sql, (
+    "Migration 004 must define private.sync_parent_case_to_campus() trigger function"
+)
+assert "AFTER UPDATE OF status, tracking_key_hash, key_version, updated_at ON public.cases" in mig_004_sql, (
+    "Parent sync trigger must listen for updates on status, tracking_key_hash, key_version, updated_at"
+)
+print("  [PASS] [Static SQL Inspection] public.cases authoritatively propagates workflow status changes to campus_cases.")
+
+print("[Test 18.2] [Static SQL Inspection] Child-to-Parent Collision & Immutability Rules (Task 1)")
+sync_fn_sql = mig_004_sql.split("CREATE OR REPLACE FUNCTION private.sync_campus_case_parent()")[1].split("$$ LANGUAGE")[0]
+assert "Case ID collision" in sync_fn_sql, (
+    "sync_campus_case_parent must reject duplicate case_id with different UUID"
+)
+assert "UUID collision" in sync_fn_sql, (
+    "sync_campus_case_parent must reject duplicate UUID with different case_id"
+)
+assert "Parent identifier immutability violation" in sync_fn_sql, (
+    "sync_campus_case_parent must reject updates that alter campus_cases.id or case_id"
+)
+print("  [PASS] [Static SQL Inspection] Collision detection rules (1-4) prevent ID mutation and duplicate key collisions.")
+
+print("[Test 18.3] [Static SQL Inspection] Zero-Seed Policy for Production Institutions (Task 2)")
+assert "INSERT INTO public.institutions" not in mig_004_sql, (
+    "Migration 004 must NOT contain any seed INSERT INTO public.institutions statements"
+)
+assert "INST_DEFAULT" not in mig_004_sql, (
+    "Migration 004 must NOT contain hardcoded INST_DEFAULT seeds or fallbacks"
+)
+print("  [PASS] [Static SQL Inspection] public.institutions table starts strictly empty; zero unapproved seeds.")
+
+print("[Test 18.4] [Unit/Static] Campus Proctor updates authoritative parent case on status change (Task 1)")
+proctor_code = (ROOT_DIR / "api" / "campus_proctor.py").read_text(encoding="utf-8")
+assert 'self.supabase.table("cases").update(' in proctor_code, (
+    "campus_proctor.py update_case must update authoritative parent cases table"
+)
+assert '"status": payload.new_status' in proctor_code, (
+    "campus_proctor.py update_case must write new_status to parent cases table"
+)
+print("  [PASS] [Unit/Static] Campus Proctor workflow updates authoritative parent cases table.")
+
 print("\n" + "=" * 70)
-print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 TESTS COMPLETED SUCCESSFULLY!")
+print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 + 1.3.7 TESTS COMPLETED SUCCESSFULLY!")
 print("=" * 70 + "\n")
+
 
 

@@ -438,6 +438,13 @@ class CampusProctorManager:
 
         if self.use_supabase and self.supabase:
             try:
+                # 1. Update authoritative parent status in public.cases (Task 1)
+                self.supabase.table("cases").update({
+                    "status": payload.new_status,
+                    "updated_at": now_iso
+                }).eq("case_id", clean_id).execute()
+
+                # 2. Update campus-specific fields in public.campus_cases
                 res = self.supabase.table("campus_cases").update(updates).eq("case_id", clean_id).execute()
                 if not res.data:
                     raise RuntimeError("Supabase update returned empty.")

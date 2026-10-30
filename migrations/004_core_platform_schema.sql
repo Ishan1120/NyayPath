@@ -107,13 +107,9 @@ CREATE POLICY "Public can view active institutions"
     TO anon, authenticated
     USING (is_active = TRUE);
 
--- Seed standard institutions with fixed deterministic UUIDs
-INSERT INTO public.institutions (id, code, name, city, state)
-VALUES 
-    ('00000000-0000-0000-0000-000000000001'::uuid, 'INST_DEFAULT', 'Default Academic Institution', 'New Delhi', 'Delhi'),
-    ('00000000-0000-0000-0000-000000000002'::uuid, 'INST_NIT_DELHI', 'National Institute of Technology Delhi', 'New Delhi', 'Delhi'),
-    ('00000000-0000-0000-0000-000000000003'::uuid, 'INST_UP_TECH', 'UP Technical University', 'Lucknow', 'Uttar Pradesh')
-ON CONFLICT (code) DO NOTHING;
+-- NOTE: Initial public.institutions table starts strictly EMPTY.
+-- Institution onboarding is strictly mediated by platform administrators via verified onboarding operations.
+-- No unapproved placeholder, test, or fictional institutional records are seeded.
 
 -- =====================================================================
 -- 3. UNIFY CAMPUS CASES WITH PARENT CASES & INSTITUTIONS (Task 1 & Task 2)
@@ -140,16 +136,11 @@ BEGIN
         ALTER TABLE public.campus_cases 
         ADD COLUMN institution_uuid UUID REFERENCES public.institutions(id) ON DELETE RESTRICT;
 
-        -- Backfill from institutions matching code
+        -- Backfill from institutions matching code if any verified institutions exist
         UPDATE public.campus_cases cc
         SET institution_uuid = inst.id
         FROM public.institutions inst
         WHERE cc.institution_id = inst.code;
-
-        -- Fallback to default institution if unmatched
-        UPDATE public.campus_cases
-        SET institution_uuid = '00000000-0000-0000-0000-000000000001'::uuid
-        WHERE institution_uuid IS NULL;
     END IF;
 END $$;
 
@@ -173,8 +164,16 @@ BEGIN
 END $$;
 
 -- Synchronization function to ensure atomic parent/child consistency without recursive loops
+-- Task 1: public.cases is the authoritative master for common case fields.
+-- Task 1 Collision Rules:
+-- 1. Same UUID and case_id: Pre-created or idempotent parent; safely synchronize or allow.
+-- 2. Same case_id with different UUID: REJECT via RAISE EXCEPTION.
+-- 3. Same UUID with different case_id: REJECT via RAISE EXCEPTION.
+-- 4. Child update attempts to alter id or case_id: REJECT via RAISE EXCEPTION.
 CREATE OR REPLACE FUNCTION private.sync_campus_case_parent()
 RETURNS TRIGGER AS $$
+DECLARE
+    v_existing_parent RECORD;
 BEGIN
     -- Prevent recursive trigger invocation
     IF pg_trigger_depth() > 1 THEN
@@ -182,45 +181,86 @@ BEGIN
     END IF;
 
     IF TG_OP = 'INSERT' THEN
-        -- Insert parent row into public.cases
-        -- Guarantees parent exists before campus_cases foreign key check commits
-        INSERT INTO public.cases (
-            id,
-            case_id,
-            case_type,
-            status,
-            tracking_key_hash,
-            key_version,
-            created_at,
-            updated_at
-        ) VALUES (
-            NEW.id,
-            NEW.case_id,
-            'CAMPUS_GRIEVANCE',
-            NEW.status,
-            NEW.verification_key_hash,
-            NEW.key_version,
-            NEW.created_at,
-            NEW.updated_at
-        )
-        ON CONFLICT (case_id) DO UPDATE SET
-            status = EXCLUDED.status,
-            tracking_key_hash = EXCLUDED.tracking_key_hash,
-            key_version = EXCLUDED.key_version,
-            updated_at = EXCLUDED.updated_at
-        WHERE public.cases.id = NEW.id; -- STRICT: Never allows altering parent UUID!
+        -- Check if parent row already exists by id OR case_id
+        SELECT id, case_id INTO v_existing_parent
+        FROM public.cases
+        WHERE id = NEW.id OR case_id = NEW.case_id
+        LIMIT 1;
 
-        RETURN NEW;
+        IF FOUND THEN
+            -- Collision Check 1: Same case_id but different UUID -> REJECT!
+            IF v_existing_parent.case_id = NEW.case_id AND v_existing_parent.id <> NEW.id THEN
+                RAISE EXCEPTION 'Case ID collision: case_id % already exists with parent UUID %, cannot associate with child UUID %',
+                    NEW.case_id, v_existing_parent.id, NEW.id;
+            END IF;
+
+            -- Collision Check 2: Same UUID but different case_id -> REJECT!
+            IF v_existing_parent.id = NEW.id AND v_existing_parent.case_id <> NEW.case_id THEN
+                RAISE EXCEPTION 'UUID collision: UUID % already exists with case_id %, cannot associate with child case_id %',
+                    NEW.id, v_existing_parent.case_id, NEW.case_id;
+            END IF;
+
+            -- Collision Check 3: Existing parent matches both UUID and case_id (Parent pre-created atomically)
+            UPDATE public.cases
+            SET
+                status = COALESCE(NEW.status, status),
+                tracking_key_hash = COALESCE(NEW.verification_key_hash, tracking_key_hash),
+                key_version = COALESCE(NEW.key_version, key_version),
+                updated_at = timezone('utc'::text, now())
+            WHERE id = NEW.id;
+
+            RETURN NEW;
+        ELSE
+            -- No parent exists: Atomically create the authoritative parent row in public.cases
+            INSERT INTO public.cases (
+                id,
+                case_id,
+                case_type,
+                status,
+                tracking_key_hash,
+                key_version,
+                created_at,
+                updated_at
+            ) VALUES (
+                NEW.id,
+                NEW.case_id,
+                'CAMPUS_GRIEVANCE',
+                COALESCE(NEW.status, 'SUBMITTED'),
+                NEW.verification_key_hash,
+                COALESCE(NEW.key_version, 'v1'),
+                COALESCE(NEW.created_at, timezone('utc'::text, now())),
+                COALESCE(NEW.updated_at, timezone('utc'::text, now()))
+            );
+
+            RETURN NEW;
+        END IF;
 
     ELSIF TG_OP = 'UPDATE' THEN
-        -- Keep parent cases synchronized when status, key, or timestamp updates
-        UPDATE public.cases
-        SET
-            status = NEW.status,
-            tracking_key_hash = NEW.verification_key_hash,
-            key_version = NEW.key_version,
-            updated_at = NEW.updated_at
-        WHERE id = NEW.id;
+        -- Collision Check 4: Child update attempts to modify parent identifiers -> REJECT!
+        IF NEW.id IS DISTINCT FROM OLD.id THEN
+            RAISE EXCEPTION 'Parent identifier immutability violation: campus_cases.id cannot be altered (attempted % -> %)',
+                OLD.id, NEW.id;
+        END IF;
+
+        IF NEW.case_id IS DISTINCT FROM OLD.case_id THEN
+            RAISE EXCEPTION 'Parent identifier immutability violation: campus_cases.case_id cannot be altered (attempted % -> %)',
+                OLD.case_id, NEW.case_id;
+        END IF;
+
+        -- For backward compatibility with existing legacy queries updating campus_cases:
+        -- Keep authoritative parent synchronized if status or credentials were updated directly on child
+        IF NEW.status IS DISTINCT FROM OLD.status OR
+           NEW.verification_key_hash IS DISTINCT FROM OLD.verification_key_hash OR
+           NEW.key_version IS DISTINCT FROM OLD.key_version THEN
+            
+            UPDATE public.cases
+            SET
+                status = NEW.status,
+                tracking_key_hash = NEW.verification_key_hash,
+                key_version = NEW.key_version,
+                updated_at = timezone('utc'::text, now())
+            WHERE id = NEW.id;
+        END IF;
 
         RETURN NEW;
     END IF;
@@ -236,8 +276,37 @@ CREATE TRIGGER trg_sync_campus_case_insert
 
 DROP TRIGGER IF EXISTS trg_sync_campus_case_update ON public.campus_cases;
 CREATE TRIGGER trg_sync_campus_case_update
-    AFTER UPDATE OF status, verification_key_hash, key_version, updated_at ON public.campus_cases
+    BEFORE UPDATE ON public.campus_cases
     FOR EACH ROW EXECUTE FUNCTION private.sync_campus_case_parent();
+
+-- =====================================================================
+-- Authoritative parent-to-child status synchronization trigger (Task 1)
+-- =====================================================================
+CREATE OR REPLACE FUNCTION private.sync_parent_case_to_campus()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Prevent recursive trigger loops
+    IF pg_trigger_depth() > 1 THEN
+        RETURN NEW;
+    END IF;
+
+    -- Propagate authoritative parent status, tracking key, and timestamp changes down to campus_cases
+    UPDATE public.campus_cases
+    SET
+        status = NEW.status,
+        verification_key_hash = NEW.tracking_key_hash,
+        key_version = NEW.key_version,
+        updated_at = NEW.updated_at
+    WHERE id = NEW.id;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
+
+DROP TRIGGER IF EXISTS trg_sync_parent_case_update ON public.cases;
+CREATE TRIGGER trg_sync_parent_case_update
+    AFTER UPDATE OF status, tracking_key_hash, key_version, updated_at ON public.cases
+    FOR EACH ROW EXECUTE FUNCTION private.sync_parent_case_to_campus();
 
 -- =====================================================================
 -- 4. PUBLIC.PLATFORM_ADMINS (Database-Backed Admin Registry)
