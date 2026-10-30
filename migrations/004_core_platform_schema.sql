@@ -1,22 +1,23 @@
 -- =====================================================================
 -- NyayPath Database Migration: 004_core_platform_schema.sql
--- Phase: 1.3.5 / 1.3.6 Complete Platform Schema & Unified Relational Integrity
+-- Phase: 1.3.6 / 1.3.7 Complete Platform Schema & Unified Relational Integrity
 -- Description:
 --   Establishes the authoritative parent case entity (public.cases) with
 --   internal UUID primary keys, links campus grievances via enforceable
 --   foreign keys, establishes immutable audit trails with RESTRICT deletion
---   guards, and enforces client privilege escalation boundaries.
+--   guards, enforces institution UUID relationships, and guards client
+--   privilege escalation boundaries.
 --
 -- Tables Defined / Augmented:
 --   1. public.cases (Authoritative Unified Parent Case Entity)
 --      - id UUID PRIMARY KEY (Internal opaque identifier)
 --      - case_id VARCHAR(64) UNIQUE (Public human-readable identifier)
 --      - Supports: RTI, CONSUMER_COMPLAINT, GENERAL_GRIEVANCE, CAMPUS_GRIEVANCE
---   2. public.campus_cases (Sub-record linked to public.cases via FK)
---   3. public.platform_admins (Authoritative platform admin registry)
---   4. public.profiles (User identity, contact details, and role registry)
---   5. public.institutions (Colleges and educational institutions)
---   6. public.institution_memberships (Officer memberships & institutional scoping)
+--   2. public.institutions (Colleges and multi-tenant registry with UUID PK)
+--   3. public.campus_cases (Sub-record linked to cases and institutions via FK)
+--   4. public.platform_admins (Authoritative platform admin registry)
+--   5. public.profiles (User identity, contact details, and role registry)
+--   6. public.institution_memberships (Officer memberships with institution UUID FK)
 --   7. public.confidential_student_identities (Decoupled PII vault)
 --   8. public.case_documents (Encrypted document attachments & metadata)
 --   9. public.case_activity_log (Immutable audit trail, RESTRICT deletion guards)
@@ -24,13 +25,13 @@
 --  11. public.saved_research (Citizen/advocate bookmarked precedents)
 --
 -- Functions Defined in 'private' Schema:
---   1. private.is_platform_admin() (Authoritative database-backed check)
---   2. private.can_officer_access_case() (Institution & active status check)
---   3. private.sync_campus_case_parent() (Auto-syncs campus cases to parent cases)
+--   1. private.sync_campus_case_parent() (Synchronizes campus cases to parent cases)
+--   2. private.is_platform_admin() (Authoritative database-backed check)
+--   3. private.can_officer_access_case(UUID) (Institutional UUID scoping check)
 --   4. private.prevent_audit_log_modification() (Blocks UPDATE/DELETE on audit logs)
 --   5. private.enforce_profile_immutability() (Blocks privilege escalation on profiles)
 --
--- Safety: Forward-only, idempotent, and non-destructive.
+-- Safety: Forward-only, strictly linear, idempotent, and non-destructive.
 -- =====================================================================
 
 -- Ensure UUID extensions exist
@@ -76,7 +77,46 @@ REVOKE ALL PRIVILEGES ON public.cases FROM PUBLIC, anon, authenticated;
 GRANT SELECT, INSERT, UPDATE ON public.cases TO service_role;
 
 -- =====================================================================
--- 2. UNIFY CAMPUS CASES WITH PARENT CASES ENTITY (Task 1 & Task 3)
+-- 2. PUBLIC.INSTITUTIONS (Colleges & Multi-Tenant Registry)
+-- =====================================================================
+-- Placed before campus_cases and institution_memberships to ensure linear FK resolution.
+
+CREATE TABLE IF NOT EXISTS public.institutions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    code VARCHAR(64) UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    city TEXT NOT NULL,
+    state TEXT NOT NULL,
+    type VARCHAR(32) NOT NULL DEFAULT 'university',
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_institutions_code ON public.institutions(code);
+
+ALTER TABLE public.institutions ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL PRIVILEGES ON public.institutions FROM PUBLIC;
+GRANT SELECT ON public.institutions TO anon, authenticated;
+GRANT ALL ON public.institutions TO service_role;
+
+DROP POLICY IF EXISTS "Public can view active institutions" ON public.institutions;
+CREATE POLICY "Public can view active institutions"
+    ON public.institutions FOR SELECT
+    TO anon, authenticated
+    USING (is_active = TRUE);
+
+-- Seed standard institutions with fixed deterministic UUIDs
+INSERT INTO public.institutions (id, code, name, city, state)
+VALUES 
+    ('00000000-0000-0000-0000-000000000001'::uuid, 'INST_DEFAULT', 'Default Academic Institution', 'New Delhi', 'Delhi'),
+    ('00000000-0000-0000-0000-000000000002'::uuid, 'INST_NIT_DELHI', 'National Institute of Technology Delhi', 'New Delhi', 'Delhi'),
+    ('00000000-0000-0000-0000-000000000003'::uuid, 'INST_UP_TECH', 'UP Technical University', 'Lucknow', 'Uttar Pradesh')
+ON CONFLICT (code) DO NOTHING;
+
+-- =====================================================================
+-- 3. UNIFY CAMPUS CASES WITH PARENT CASES & INSTITUTIONS (Task 1 & Task 2)
 -- =====================================================================
 -- Augment campus_cases with key_version if not present
 DO $$
@@ -87,6 +127,29 @@ BEGIN
     ) THEN
         ALTER TABLE public.campus_cases 
         ADD COLUMN key_version VARCHAR(10) NOT NULL DEFAULT 'v1';
+    END IF;
+END $$;
+
+-- Augment campus_cases with institution_uuid referencing public.institutions(id)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'campus_cases' AND column_name = 'institution_uuid'
+    ) THEN
+        ALTER TABLE public.campus_cases 
+        ADD COLUMN institution_uuid UUID REFERENCES public.institutions(id) ON DELETE RESTRICT;
+
+        -- Backfill from institutions matching code
+        UPDATE public.campus_cases cc
+        SET institution_uuid = inst.id
+        FROM public.institutions inst
+        WHERE cc.institution_id = inst.code;
+
+        -- Fallback to default institution if unmatched
+        UPDATE public.campus_cases
+        SET institution_uuid = '00000000-0000-0000-0000-000000000001'::uuid
+        WHERE institution_uuid IS NULL;
     END IF;
 END $$;
 
@@ -109,18 +172,18 @@ BEGIN
     END IF;
 END $$;
 
--- Automatic function to synchronize campus grievance insertions and updates into parent cases entity
+-- Synchronization function to ensure atomic parent/child consistency without recursive loops
 CREATE OR REPLACE FUNCTION private.sync_campus_case_parent()
 RETURNS TRIGGER AS $$
 BEGIN
-    -- Prevent recursive trigger loop
+    -- Prevent recursive trigger invocation
     IF pg_trigger_depth() > 1 THEN
         RETURN NEW;
     END IF;
 
     IF TG_OP = 'INSERT' THEN
         -- Insert parent row into public.cases
-        -- Ensures parent exists before campus_cases foreign key check commits
+        -- Guarantees parent exists before campus_cases foreign key check commits
         INSERT INTO public.cases (
             id,
             case_id,
@@ -177,7 +240,7 @@ CREATE TRIGGER trg_sync_campus_case_update
     FOR EACH ROW EXECUTE FUNCTION private.sync_campus_case_parent();
 
 -- =====================================================================
--- 3. PUBLIC.PLATFORM_ADMINS (Database-Backed Admin Registry)
+-- 4. PUBLIC.PLATFORM_ADMINS (Database-Backed Admin Registry)
 -- =====================================================================
 -- Consumer: private.is_platform_admin(), api/auth.py
 
@@ -200,7 +263,7 @@ REVOKE ALL PRIVILEGES ON public.platform_admins FROM PUBLIC, anon, authenticated
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.platform_admins TO service_role;
 
 -- =====================================================================
--- 4. AUTHORITATIVE private.is_platform_admin() FUNCTION
+-- 5. AUTHORITATIVE private.is_platform_admin() FUNCTION
 -- =====================================================================
 -- Replaces insecure JWT app_metadata checks with live database state
 
@@ -221,7 +284,7 @@ REVOKE ALL PRIVILEGES ON FUNCTION private.is_platform_admin() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION private.is_platform_admin() TO authenticated, service_role;
 
 -- =====================================================================
--- 5. PUBLIC.PROFILES (User Identity & Role Registry)
+-- 6. PUBLIC.PROFILES (User Identity & Role Registry)
 -- =====================================================================
 -- Consumer: User profile management, role verification
 
@@ -289,46 +352,16 @@ CREATE TRIGGER trg_profile_immutability
     FOR EACH ROW EXECUTE FUNCTION private.enforce_profile_immutability();
 
 -- =====================================================================
--- 6. PUBLIC.INSTITUTIONS (Colleges & Multi-Tenant Registry)
+-- 7. PUBLIC.INSTITUTION_MEMBERSHIPS (Officer Roles with UUID FK)
 -- =====================================================================
--- Consumer: Institutional onboarding, proctorial isolation
-
-CREATE TABLE IF NOT EXISTS public.institutions (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    code VARCHAR(64) UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    city TEXT NOT NULL,
-    state TEXT NOT NULL,
-    type VARCHAR(32) NOT NULL DEFAULT 'university',
-    is_active BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
-);
-
-CREATE INDEX IF NOT EXISTS idx_institutions_code ON public.institutions(code);
-
-ALTER TABLE public.institutions ENABLE ROW LEVEL SECURITY;
-
-REVOKE ALL PRIVILEGES ON public.institutions FROM PUBLIC;
-GRANT SELECT ON public.institutions TO anon, authenticated;
-GRANT ALL ON public.institutions TO service_role;
-
-DROP POLICY IF EXISTS "Public can view active institutions" ON public.institutions;
-CREATE POLICY "Public can view active institutions"
-    ON public.institutions FOR SELECT
-    TO anon, authenticated
-    USING (is_active = TRUE);
-
--- =====================================================================
--- 7. PUBLIC.INSTITUTION_MEMBERSHIPS (Officer Roles & Scoping)
--- =====================================================================
--- Consumer: api/auth.py, private.can_officer_access_case()
+-- Task 2: Uses authoritative UUID FK referencing public.institutions(id).
 -- Notice: Authenticated users have SELECT only; NO client INSERT or UPDATE.
 
 CREATE TABLE IF NOT EXISTS public.institution_memberships (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE RESTRICT,
-    institution_id VARCHAR(64) NOT NULL,
+    institution_id UUID NOT NULL REFERENCES public.institutions(id) ON DELETE RESTRICT,
+    institution_code VARCHAR(64) NOT NULL,
     role VARCHAR(32) NOT NULL CHECK (
         role IN ('proctor', 'committee_member', 'institution_admin', 'platform_admin')
     ),
@@ -356,11 +389,11 @@ CREATE POLICY "Officers can view their own membership"
     USING (user_id = auth.uid());
 
 -- =====================================================================
--- 8. AUTHORITATIVE private.can_officer_access_case() FUNCTION
+-- 8. AUTHORITATIVE private.can_officer_access_case(UUID) FUNCTION
 -- =====================================================================
--- Database-backed check ensuring active status and approved roles
+-- Task 2: Accepts UUID and performs exact UUID-to-UUID comparison.
 
-CREATE OR REPLACE FUNCTION private.can_officer_access_case(p_institution_id TEXT)
+CREATE OR REPLACE FUNCTION private.can_officer_access_case(p_institution_id UUID)
 RETURNS boolean
 LANGUAGE sql STABLE SECURITY DEFINER
 SET search_path = ''
@@ -375,8 +408,8 @@ AS $$
   );
 $$;
 
-REVOKE ALL PRIVILEGES ON FUNCTION private.can_officer_access_case(TEXT) FROM PUBLIC, anon;
-GRANT EXECUTE ON FUNCTION private.can_officer_access_case(TEXT) TO authenticated, service_role;
+REVOKE ALL PRIVILEGES ON FUNCTION private.can_officer_access_case(UUID) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION private.can_officer_access_case(UUID) TO authenticated, service_role;
 
 -- =====================================================================
 -- 9. PUBLIC.CONFIDENTIAL_STUDENT_IDENTITIES (PII Vault)
@@ -440,6 +473,7 @@ CREATE POLICY "Authenticated users can view attachments for their cases"
 -- =====================================================================
 -- Task 2 & Task 4: authenticated has SELECT only; INSERT restricted to service_role.
 -- Foreign keys use ON DELETE RESTRICT to avoid conflicting with the immutability trigger.
+-- action_details strictly contains operational telemetry (NEVER personal PII or raw credentials).
 
 CREATE TABLE IF NOT EXISTS public.case_activity_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -474,11 +508,12 @@ CREATE POLICY "Officers and users can view authorized activity logs"
         -- 2. Actors can view their own logged actions
         actor_id = auth.uid()
         OR
-        -- 3. Officers can view logs for cases belonging to their authorized institution
+        -- 3. Officers can view logs for cases belonging to their authorized institution UUID
         EXISTS (
             SELECT 1 FROM public.campus_cases cc
             WHERE cc.id = case_activity_log.case_uuid
-              AND private.can_officer_access_case(cc.institution_id)
+              AND cc.institution_uuid IS NOT NULL
+              AND private.can_officer_access_case(cc.institution_uuid)
         )
     );
 
