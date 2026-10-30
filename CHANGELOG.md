@@ -105,3 +105,38 @@
   - `npx tsc --noEmit`: 100% Passed (0 TypeScript compilation errors)
 
 ---
+
+
+## [Phase 1.3.4] Critical Security Remediation & Credential Separation
+- **Timestamp:** 2026-10-31 01:00 IST
+- **Category:** Security Remediation, CORS Hardening & Credential Isolation
+- **Status:** Implemented & 100% Verified
+- **Branch:** eature/phase-1.3.4-security-remediation
+- **Summary:**
+  - **Task 1 (CORS Hardening):** Removed wildcard llow_origins=["*"] from pi/index.py. Restricted CORS origins explicitly to local Next.js frontend (http://localhost:3000 and http://127.0.0.1:3000). Enforced explicit HTTP methods (GET, POST, PUT, PATCH, DELETE, OPTIONS) and specific request headers (Authorization, Content-Type, X-Requested-With, x-proctor-token).
+  - **Task 2 (AUTH_SALT Remediation & Case Tracking HMAC Key):** Audited AUTH_SALT usage across codebase; confirmed it was used exclusively for salting grievance verification key hashes and completely disconnected from officer password hashing (which uses per-password random salts via PBKDF2). Replaced committed static salt fallback with CASE_TRACKING_HMAC_KEY, enforcing 256-bit entropy in production and fail-secure startup halting if missing. In development, dynamic ephemeral 256-bit runtime keys are generated.
+  - **Task 3 (Supabase Credential Separation):** Disentangled ambiguous SUPABASE_KEY into strictly separated configuration variables:
+    - SUPABASE_PUBLISHABLE_KEY: Used exclusively for client/user-facing authentication operations (sb_client.auth.sign_in_with_password()) in pi/auth.py.
+    - SUPABASE_SECRET_KEY: Used exclusively for privileged backend administrative and infrastructure operations in pi/campus_proctor.py, pi/case_manager.py, and pi/rate_limiter.py.
+    - Removed all ambiguous SUPABASE_KEY references across Python modules. Updated .env.example accordingly.
+  - **Task 4 (Rate Limiter Database Security & Fail-Secure Hardening):**
+    - Prepared forward-only migration migrations/003_rate_limit_security_fix.sql dropping the overly permissive FOR ALL TO public, anon, authenticated policy on ate_limit_attempts.
+    - Revoked all table access from PUBLIC, non, and uthenticated.
+    - Granted minimum required privileges (SELECT, INSERT, UPDATE, DELETE) exclusively to service_role.
+    - Hardened cleanup_stale_rate_limits() and erify_student_grievance_access() with SET search_path = '' to prevent search path injection.
+    - Updated pi/rate_limiter.py to fail-secure (deny with 60s cooldown) if both remote Supabase and local SQLite storage fail simultaneously, eliminating silent rate-limiting bypass.
+- **Files Modified / Created:**
+  - migrations/003_rate_limit_security_fix.sql (Created)
+  - pi/index.py (CORS origins restricted)
+  - pi/auth.py (AUTH_SALT removed, CASE_TRACKING_HMAC_KEY implemented, publishable key separated)
+  - pi/campus_proctor.py (SUPABASE_SECRET_KEY separated)
+  - pi/case_manager.py (SUPABASE_SECRET_KEY separated)
+  - pi/rate_limiter.py (SUPABASE_SECRET_KEY separated, fail-secure denial on total failure)
+  - .env.example (Updated template with separated keys)
+  - 	ests/test_phase1.py (Expanded with Sections 10-13 covering all Phase 1.3.4 remediations)
+- **Verification Result:**
+  - 	ests/test_phase1.py: 100% Passed (38 test assertions across 13 sections)
+  - 	ests/test_pipeline.py: 100% Passed (11 core modules)
+  - 
+px tsc --noEmit: 100% Passed (0 TypeScript errors)
+  - Remote Database Connections: 0 (No external database contacted)

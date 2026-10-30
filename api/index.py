@@ -106,12 +106,23 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="NyayPath AI API", version="2.6")
 
+# =====================================================================
+# CORS Configuration (Phase 1.3.4 — restricted from wildcard)
+# Origins: Next.js local dev only. No wildcard in any environment.
+# allow_credentials=False: tokens are sent in Authorization headers,
+#   not as cookies, so SameSite credential flow is not required.
+# =====================================================================
+_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With", "x-proctor-token"],
 )
 
 app.include_router(intake_router)

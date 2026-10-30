@@ -22,14 +22,20 @@ logger = logging.getLogger(__name__)
 class RateLimiter:
     def __init__(self):
         url = os.environ.get("SUPABASE_URL", "")
-        key = os.environ.get("SUPABASE_KEY", "")
-        self.use_supabase = bool(url and key and create_client)
+        # Rate limiter operations (SELECT/INSERT/UPDATE/DELETE on rate_limit_attempts)
+        # must be performed by the backend service only — never by browser clients.
+        # The rate_limit_attempts table has no GRANT to anon or authenticated roles;
+        # only service_role may access it. Therefore this client must use the
+        # service_role secret key.
+        # SUPABASE_SECRET_KEY: service_role key — never sent to the browser.
+        secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
+        self.use_supabase = bool(url and secret_key and create_client)
         self.supabase: Optional[Client] = None
         self._local_db_path = os.environ.get("CAMPUS_SQLITE_DB", "campus_cases_persistent.db")
 
         if self.use_supabase:
             try:
-                self.supabase = create_client(url, key)
+                self.supabase = create_client(url, secret_key)
             except Exception as e:
                 logger.warning(f"RateLimiter Supabase init warning: {e}")
                 self.use_supabase = False
@@ -98,6 +104,8 @@ class RateLimiter:
                 return True, 0
             except Exception as e:
                 logger.warning(f"Rate limit Supabase query failed: {e}")
+                # Fall through to SQLite if configured; if SQLite also unavailable,
+                # the check_rate_limit method will log and fail-secure below.
 
         # 2. SQLite implementation
         try:
@@ -129,7 +137,14 @@ class RateLimiter:
             return True, 0
         except Exception as e:
             logger.error(f"Rate limit SQLite error: {e}")
-            return True, 0
+            # Fail-secure: if both Supabase AND SQLite are unavailable, DENY the
+            # request rather than silently allowing unlimited attempts through.
+            # This prevents an infrastructure failure from disabling rate limiting.
+            logger.critical(
+                "Rate limiter storage completely unavailable. Returning DENY (fail-secure). "
+                "Retry-After=60 to allow recovery without permanent lockout."
+            )
+            return False, 60
 
     def record_failure(
         self,

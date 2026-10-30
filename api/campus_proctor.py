@@ -91,9 +91,16 @@ class StudentTrackingRequest(BaseModel):
 class CampusProctorManager:
     def __init__(self):
         url: str = os.environ.get("SUPABASE_URL", "")
-        key: str = os.environ.get("SUPABASE_KEY", "")
+        # Campus proctor operations require the service-role secret key because:
+        #   - Case writes (INSERT/UPDATE) are performed by the FastAPI backend on
+        #     behalf of authenticated users — not directly by browser clients.
+        #   - The backend verifies identity and institution boundary in application
+        #     code before issuing any database write.
+        #   - Anon/publishable key cannot bypass RLS for service-side writes.
+        # SUPABASE_SECRET_KEY: service_role key — never sent to the browser.
+        secret_key: str = os.environ.get("SUPABASE_SECRET_KEY", "")
 
-        self.use_supabase = bool(url and key and create_client)
+        self.use_supabase = bool(url and secret_key and create_client)
         self.supabase: Optional[Client] = None
         self._local_db_path = os.environ.get("CAMPUS_SQLITE_DB", "campus_cases_persistent.db")
 
@@ -115,7 +122,7 @@ class CampusProctorManager:
 
         if self.use_supabase:
             try:
-                self.supabase = create_client(url, key)
+                self.supabase = create_client(url, secret_key)
                 logger.info("Campus Proctor Manager: Connected to Supabase PostgreSQL.")
             except Exception as e:
                 logger.error(f"Campus Proctor Supabase connection error: {e}")

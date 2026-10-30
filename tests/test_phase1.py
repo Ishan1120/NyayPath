@@ -1,6 +1,6 @@
 """
-NyayPath Phase 1.2 Comprehensive Security, Authentication & Database Persistence Test Suite
-Mandated by Task 10 of NyayPath Phase 1.2 Specifications.
+NyayPath Phase 1.2 + 1.3.4 Comprehensive Security, Authentication & Database Persistence Test Suite
+Covers Phase 1.2 mandated tests plus Phase 1.3.4 security remediation verifications.
 
 Verifies:
 1. JWT Secret Security & Fail-Secure Validation
@@ -13,6 +13,10 @@ Verifies:
 8. Production Database Persistence Enforcement (Fail-secure 503 on missing DB)
 9. Cross-Institution Proctorial Boundary Enforcement
 10. Restricted Diagnostic Security (Zero Secret Leakage)
+11. [Phase 1.3.4] CORS Configuration (restricted origins, explicit methods/headers)
+12. [Phase 1.3.4] CASE_TRACKING_HMAC_KEY — no hardcoded AUTH_SALT fallback
+13. [Phase 1.3.4] Supabase credential separation (PUBLISHABLE vs SECRET)
+14. [Phase 1.3.4] Rate limiter fail-secure (deny on storage failure)
 """
 
 import os
@@ -61,7 +65,7 @@ except Exception:
 client = TestClient(app)
 
 print("\n" + "=" * 70)
-print("  NYAYPATH PHASE 1.2 SECURITY & REMEDIATION COMPREHENSIVE TEST SUITE")
+print("  NYAYPATH PHASE 1.2 + 1.3.4 SECURITY COMPREHENSIVE TEST SUITE")
 print("=" * 70)
 
 # =====================================================================
@@ -442,4 +446,304 @@ print("  [PASS] Platform Admin diagnostic returns safe summary with zero credent
 
 print("\n" + "=" * 70)
 print("  ALL NYAYPATH PHASE 1.2 TESTS COMPLETED SUCCESSFULLY WITH 100% PASS RATE!")
+print("=" * 70 + "\n")
+
+
+# =====================================================================
+# SECTION 10: PHASE 1.3.4 — CORS CONFIGURATION (TASK 1)
+# =====================================================================
+print("\n--- SECTION 10: CORS ORIGIN RESTRICTION [Phase 1.3.4] ---")
+
+print("[Test 10.1] OPTIONS preflight from http://localhost:3000 is allowed")
+r_cors_ok = client.options(
+    "/api/health",
+    headers={
+        "Origin": "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "Authorization, Content-Type",
+    }
+)
+# TestClient follows CORS; the middleware should add the ACAO header for allowed origins
+acao = r_cors_ok.headers.get("access-control-allow-origin", "")
+assert acao == "http://localhost:3000", (
+    f"Expected CORS to allow http://localhost:3000, got: '{acao}'"
+)
+print("  [PASS] Preflight from http://localhost:3000 returns correct Access-Control-Allow-Origin.")
+
+print("[Test 10.2] OPTIONS preflight from http://127.0.0.1:3000 is allowed")
+r_cors_ip = client.options(
+    "/api/health",
+    headers={
+        "Origin": "http://127.0.0.1:3000",
+        "Access-Control-Request-Method": "GET",
+    }
+)
+acao_ip = r_cors_ip.headers.get("access-control-allow-origin", "")
+assert acao_ip == "http://127.0.0.1:3000", (
+    f"Expected CORS to allow http://127.0.0.1:3000, got: '{acao_ip}'"
+)
+print("  [PASS] Preflight from http://127.0.0.1:3000 returns correct Access-Control-Allow-Origin.")
+
+print("[Test 10.3] Wildcard '*' is NOT present in any CORS header")
+r_any = client.options(
+    "/api/health",
+    headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"}
+)
+for header_name, header_val in r_any.headers.items():
+    if "access-control" in header_name.lower():
+        assert header_val != "*", (
+            f"Wildcard '*' found in CORS header {header_name}: {header_val}"
+        )
+print("  [PASS] No wildcard '*' present in any CORS response header.")
+
+print("[Test 10.4] Allowed methods are explicit (not wildcard)")
+allowed_methods_header = r_any.headers.get("access-control-allow-methods", "")
+# Must contain specific verbs; must NOT be a bare "*"
+assert allowed_methods_header != "*", "allow_methods must not be wildcard '*'"
+print(f"  [PASS] Access-Control-Allow-Methods: {allowed_methods_header}")
+
+print("[Test 10.5] Allowed headers are explicit (not wildcard)")
+allowed_headers_header = r_any.headers.get("access-control-allow-headers", "")
+assert allowed_headers_header != "*", "allow_headers must not be wildcard '*'"
+print(f"  [PASS] Access-Control-Allow-Headers: {allowed_headers_header}")
+
+
+# =====================================================================
+# SECTION 11: PHASE 1.3.4 — CASE TRACKING HMAC KEY (TASK 2)
+# =====================================================================
+print("\n--- SECTION 11: CASE_TRACKING_HMAC_KEY SECURITY [Phase 1.3.4] ---")
+
+print("[Test 11.1] AUTH_SALT is no longer exported from api.auth")
+import api.auth as auth_module_134
+assert not hasattr(auth_module_134, "AUTH_SALT"), (
+    "AUTH_SALT still exported from api.auth — hardcoded fallback must be removed."
+)
+print("  [PASS] AUTH_SALT no longer exists in api.auth module.")
+
+print("[Test 11.2] CASE_TRACKING_HMAC_KEY is initialised at module load")
+assert hasattr(auth_module_134, "CASE_TRACKING_HMAC_KEY"), (
+    "CASE_TRACKING_HMAC_KEY missing from api.auth — remediation not applied."
+)
+hmac_key = auth_module_134.CASE_TRACKING_HMAC_KEY
+assert isinstance(hmac_key, str) and len(hmac_key) >= 32, (
+    f"CASE_TRACKING_HMAC_KEY too short or wrong type: {type(hmac_key)} len={len(hmac_key)}"
+)
+print(f"  [PASS] CASE_TRACKING_HMAC_KEY initialised ({len(hmac_key)}-char string).")
+
+print("[Test 11.3] hash_verification_key uses CASE_TRACKING_HMAC_KEY (not hardcoded salt)")
+import hashlib
+vkey = "SEC-TESTKEY00000000000000000000000"
+computed = hash_verification_key(vkey)
+# Confirm it does NOT match the old hardcoded salt computation
+old_hardcoded_salt = "nyaypath_verification_salt_2026_remediated"
+old_hash = hashlib.sha256(f"{old_hardcoded_salt}:{vkey.strip().upper()}".encode()).hexdigest()
+# They would only match if the env var happens to equal the old hardcoded value
+if os.environ.get("CASE_TRACKING_HMAC_KEY") != old_hardcoded_salt:
+    assert computed != old_hash, (
+        "hash_verification_key is still using the hardcoded salt — not remediated."
+    )
+print("  [PASS] hash_verification_key uses CASE_TRACKING_HMAC_KEY, not hardcoded string.")
+
+print("[Test 11.4] Verification key round-trip still works after remediation")
+fresh_key = generate_secure_verification_key()
+fresh_hash = hash_verification_key(fresh_key)
+assert verify_tracking_credential(fresh_key, fresh_hash) is True
+assert verify_tracking_credential("SEC-AAAAAAAAAAAAAAAAAAAAAAAAAAAA0000", fresh_hash) is False
+print("  [PASS] Verification key round-trip (generate -> hash -> verify) still correct.")
+
+print("[Test 11.5] PBKDF2 password hashing is independent (uses per-password random salt)")
+import inspect
+pw_hash_src = inspect.getsource(auth_module_134.hash_officer_password)
+# The function must NOT reference AUTH_SALT or CASE_TRACKING_HMAC_KEY
+assert "AUTH_SALT" not in pw_hash_src, "hash_officer_password must not use AUTH_SALT"
+assert "CASE_TRACKING_HMAC_KEY" not in pw_hash_src, (
+    "hash_officer_password must not use CASE_TRACKING_HMAC_KEY — it uses per-password salts"
+)
+print("  [PASS] PBKDF2 password hashing confirmed independent of tracking HMAC key.")
+
+print("[Test 11.6] Production startup halts if CASE_TRACKING_HMAC_KEY is missing")
+orig_env_val = os.environ.get("ENV")
+orig_hmac = os.environ.get("CASE_TRACKING_HMAC_KEY")
+try:
+    os.environ["ENV"] = "production"
+    os.environ.pop("CASE_TRACKING_HMAC_KEY", None)
+    failed_securely = False
+    try:
+        auth_module_134._init_case_tracking_hmac_key()
+    except RuntimeError as e:
+        failed_securely = "Production startup halted" in str(e)
+    assert failed_securely, "Production did not halt on missing CASE_TRACKING_HMAC_KEY"
+    print("  [PASS] Production startup halts securely when CASE_TRACKING_HMAC_KEY is absent.")
+finally:
+    if orig_env_val:
+        os.environ["ENV"] = orig_env_val
+    else:
+        os.environ.pop("ENV", None)
+    if orig_hmac:
+        os.environ["CASE_TRACKING_HMAC_KEY"] = orig_hmac
+
+
+# =====================================================================
+# SECTION 12: PHASE 1.3.4 — SUPABASE CREDENTIAL SEPARATION (TASK 3)
+# =====================================================================
+print("\n--- SECTION 12: SUPABASE CREDENTIAL SEPARATION [Phase 1.3.4] ---")
+
+print("[Test 12.1] SUPABASE_KEY no longer referenced in api.auth")
+import api.auth as _auth_src_check
+auth_src = inspect.getsource(_auth_src_check)
+assert 'os.environ.get("SUPABASE_KEY")' not in auth_src, (
+    'api/auth.py still reads SUPABASE_KEY — must use SUPABASE_PUBLISHABLE_KEY'
+)
+print('  [PASS] api/auth.py no longer reads ambiguous "SUPABASE_KEY".')
+
+print("[Test 12.2] api/auth.py uses SUPABASE_PUBLISHABLE_KEY for sign_in_with_password")
+assert 'SUPABASE_PUBLISHABLE_KEY' in auth_src, (
+    "api/auth.py must read SUPABASE_PUBLISHABLE_KEY for user-facing auth operations"
+)
+print("  [PASS] api/auth.py reads SUPABASE_PUBLISHABLE_KEY for Supabase Auth login.")
+
+print("[Test 12.3] SUPABASE_KEY no longer referenced in api.rate_limiter")
+import api.rate_limiter as rl_mod
+rl_src = inspect.getsource(rl_mod)
+assert 'os.environ.get("SUPABASE_KEY")' not in rl_src, (
+    'api/rate_limiter.py still reads SUPABASE_KEY — must use SUPABASE_SECRET_KEY'
+)
+assert 'SUPABASE_SECRET_KEY' in rl_src, (
+    "api/rate_limiter.py must read SUPABASE_SECRET_KEY"
+)
+print("  [PASS] api/rate_limiter.py reads SUPABASE_SECRET_KEY (service_role).")
+
+print("[Test 12.4] SUPABASE_KEY no longer referenced in api.campus_proctor")
+import api.campus_proctor as cp_mod
+cp_src = inspect.getsource(cp_mod.CampusProctorManager.__init__)
+assert 'SUPABASE_KEY' not in cp_src, (
+    "CampusProctorManager.__init__ still reads SUPABASE_KEY — must use SUPABASE_SECRET_KEY"
+)
+assert 'SUPABASE_SECRET_KEY' in cp_src, (
+    "CampusProctorManager.__init__ must read SUPABASE_SECRET_KEY"
+)
+print("  [PASS] api/campus_proctor.py reads SUPABASE_SECRET_KEY for case operations.")
+
+print("[Test 12.5] api/case_manager.py uses SUPABASE_SECRET_KEY (mock test without live DB)")
+import api.case_manager as cm_mod
+orig_url = os.environ.get("SUPABASE_URL")
+orig_secret = os.environ.get("SUPABASE_SECRET_KEY")
+orig_pubkey = os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+# Ensure SUPABASE_KEY is absent to confirm old variable is not being read
+os.environ.pop("SUPABASE_KEY", None)
+os.environ["SUPABASE_URL"] = "https://mock.supabase.co"
+os.environ["SUPABASE_SECRET_KEY"] = "mock_secret_key_for_test_1234567890abcdef"
+os.environ.pop("SUPABASE_PUBLISHABLE_KEY", None)
+
+# Reload the module to pick up new env vars — inspect source is sufficient here
+cm_src = open(ROOT_DIR / "api" / "case_manager.py").read()
+assert 'os.environ.get("SUPABASE_KEY"' not in cm_src, (
+    "api/case_manager.py still reads SUPABASE_KEY — must use SUPABASE_SECRET_KEY"
+)
+assert 'SUPABASE_SECRET_KEY' in cm_src, (
+    "api/case_manager.py must read SUPABASE_SECRET_KEY"
+)
+# Restore env
+if orig_url:
+    os.environ["SUPABASE_URL"] = orig_url
+else:
+    os.environ.pop("SUPABASE_URL", None)
+if orig_secret:
+    os.environ["SUPABASE_SECRET_KEY"] = orig_secret
+else:
+    os.environ.pop("SUPABASE_SECRET_KEY", None)
+if orig_pubkey:
+    os.environ["SUPABASE_PUBLISHABLE_KEY"] = orig_pubkey
+print("  [PASS] api/case_manager.py reads SUPABASE_SECRET_KEY (service_role).")
+
+print("[Test 12.6] SUPABASE_KEY is absent from all remediataed modules (static grep)")
+import subprocess, sys as _sys
+result = subprocess.run(
+    [_sys.executable, "-c",
+     "import subprocess, sys; "
+     "files = ['api/auth.py','api/case_manager.py','api/campus_proctor.py','api/rate_limiter.py']; "
+     "[print(f) or exit(1) for f in files if 'SUPABASE_KEY' in open(f).read() and 'SUPABASE_SECRET_KEY' not in open(f).read()]"
+    ],
+    capture_output=True, text=True,
+    cwd=str(ROOT_DIR)
+)
+# A simpler approach: just read and check each file
+bad_files = []
+for fname in ["api/auth.py", "api/case_manager.py", "api/campus_proctor.py", "api/rate_limiter.py"]:
+    src = (ROOT_DIR / fname).read_text(encoding="utf-8")
+    # If the file contains SUPABASE_KEY but NOT as part of SUPABASE_SECRET_KEY or SUPABASE_PUBLISHABLE_KEY
+    if '"SUPABASE_KEY"' in src:
+        bad_files.append(fname)
+assert not bad_files, f"Ambiguous SUPABASE_KEY still present in: {bad_files}"
+print("  [PASS] No ambiguous SUPABASE_KEY reference in any remediated module.")
+
+
+# =====================================================================
+# SECTION 13: PHASE 1.3.4 — RATE LIMITER FAIL-SECURE (TASK 4)
+# =====================================================================
+print("\n--- SECTION 13: RATE LIMITER FAIL-SECURE BEHAVIOUR [Phase 1.3.4] ---")
+
+print("[Test 13.1] Rate limiter check_rate_limit returns (False, >0) on storage failure")
+from api.rate_limiter import RateLimiter
+import tempfile
+
+# Create a limiter pointing at an invalid SQLite path to force storage failure
+failed_limiter = RateLimiter.__new__(RateLimiter)
+failed_limiter.use_supabase = False
+failed_limiter.supabase = None
+failed_limiter._local_db_path = "/nonexistent/path/that/cannot/be/created/ratelimit.db"
+
+allowed, retry_after = failed_limiter.check_rate_limit("test:key:127.0.0.1")
+assert allowed is False, (
+    f"Rate limiter must DENY (fail-secure) when storage is unavailable. Got allowed={allowed}"
+)
+assert retry_after > 0, (
+    f"Rate limiter must return positive retry_after on fail-secure deny. Got {retry_after}"
+)
+print(f"  [PASS] Rate limiter fails secure: DENY with retry_after={retry_after}s when storage unavailable.")
+
+print("[Test 13.2] Migration 003 SQL file exists and removes permissive policy")
+migration_path = ROOT_DIR / "migrations" / "003_rate_limit_security_fix.sql"
+assert migration_path.exists(), "migrations/003_rate_limit_security_fix.sql not found"
+migration_sql = migration_path.read_text(encoding="utf-8")
+assert "DROP POLICY IF EXISTS" in migration_sql, (
+    "Migration 003 must DROP the overly permissive rate_limit policy"
+)
+assert "REVOKE ALL PRIVILEGES" in migration_sql or "REVOKE ALL" in migration_sql, (
+    "Migration 003 must REVOKE access from anon/authenticated"
+)
+assert "TO service_role" in migration_sql, (
+    "Migration 003 must GRANT only to service_role"
+)
+assert "GRANT SELECT, INSERT, UPDATE, DELETE" in migration_sql, (
+    "Migration 003 must use explicit privilege list, not GRANT ALL"
+)
+assert "SET search_path = ''" in migration_sql, (
+    "Migration 003 must harden SECURITY DEFINER functions with SET search_path"
+)
+print("  [PASS] migrations/003_rate_limit_security_fix.sql contains all required corrections.")
+
+print("[Test 13.3] Migration 003 does NOT contain active GRANT ALL (privilege minimisation)")
+active_sql_lines = [
+    line.strip() for line in migration_sql.splitlines()
+    if line.strip() and not line.strip().startswith("--")
+]
+active_sql = "\n".join(active_sql_lines)
+assert "GRANT ALL" not in active_sql, (
+    "Migration 003 must not use GRANT ALL - enumerate specific privileges"
+)
+print("  [PASS] Migration 003 uses specific privilege grants, no GRANT ALL.")
+
+print("[Test 13.4] verify_student_grievance_access still verifies key+hash (functional check)")
+# The function is still present in the app; verify the tracking workflow is intact
+# (already tested in Section 6, but we confirm after migration file changes)
+fresh_vkey = generate_secure_verification_key()
+fresh_vhash = hash_verification_key(fresh_vkey)
+assert verify_tracking_credential(fresh_vkey, fresh_vhash) is True
+assert verify_tracking_credential("SEC-WRONG_KEY_00000000000000000000", fresh_vhash) is False
+print("  [PASS] Case tracking verification logic intact after credential separation changes.")
+
+
+print("\n" + "=" * 70)
+print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 TESTS COMPLETED SUCCESSFULLY!")
 print("=" * 70 + "\n")

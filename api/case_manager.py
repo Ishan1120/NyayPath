@@ -15,14 +15,19 @@ logger = logging.getLogger(__name__)
 class CaseManager:
     def __init__(self):
         url: str = os.environ.get("SUPABASE_URL", "")
-        key: str = os.environ.get("SUPABASE_KEY", "")
+        # CaseManager performs backend-only RTI/consumer case UPSERT and SELECT
+        # operations. These are service-side writes that must use the service_role
+        # key to bypass RLS and allow the backend to manage cases independently
+        # of user sessions.
+        # SUPABASE_SECRET_KEY: service_role key -- never sent to the browser.
+        secret_key: str = os.environ.get("SUPABASE_SECRET_KEY", "")
 
-        self.use_supabase = bool(url and key and create_client)
+        self.use_supabase = bool(url and secret_key and create_client)
         self._memory_cases: Dict[str, Dict[str, Any]] = {}
 
         if self.use_supabase:
             try:
-                self.supabase: Client = create_client(url, key)
+                self.supabase: Client = create_client(url, secret_key)
                 logger.info("Database Connected: Using Supabase for persistent case storage.")
             except Exception as e:
                 logger.error(f"Supabase initialization error: {e}")
