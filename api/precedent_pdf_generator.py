@@ -1,5 +1,5 @@
 """
-JanAdhikar Case Brief PDF Generator
+NyayPath Case Brief PDF Generator
 Compiles court-ready, 1-page structured Judicial Case Brief PDFs using ReportLab.
 Includes Presiding Bench, Hearing Directives, Binding Legal Ratio, and Quotable Citations.
 """
@@ -121,7 +121,7 @@ def generate_precedent_case_brief_pdf(case: Dict[str, Any]) -> bytes:
     elements = []
 
     # 1. Header Banner
-    elements.append(Paragraph("JANADHIKAR JUDICIAL PRECEDENT REPOSITORY", header_style))
+    elements.append(Paragraph("NYAYPATH JUDICIAL PRECEDENT REPOSITORY", header_style))
     elements.append(Paragraph("COURT-READY ADVOCATE CASE BRIEF &amp; STATUTORY RATIO LEDGER", sub_header_style))
     elements.append(Spacer(1, 8))
     elements.append(HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#991B1B'), spaceAfter=12))
@@ -219,7 +219,7 @@ def generate_precedent_case_brief_pdf(case: Dict[str, Any]) -> bytes:
 
     # 9. Verification & Stamp Footer
     elements.append(HRFlowable(width="100%", thickness=0.75, color=colors.HexColor('#CBD5E1'), spaceAfter=6))
-    footer_text = "Verified from Indian Judicial Archives • Generated via JanAdhikar Legal Engine • Admissible for legal citation in public filings."
+    footer_text = "Verified from Indian Judicial Archives • Generated via NyayPath Legal Engine • Admissible for legal citation in public filings."
     elements.append(Paragraph(footer_text, sub_header_style))
 
     doc.build(elements)

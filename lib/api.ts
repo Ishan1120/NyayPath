@@ -5,6 +5,17 @@ const api = axios.create({
   timeout: 60000,
 });
 
+// Automatic authorization header interceptor for authenticated Proctor/Committee sessions
+api.interceptors.request.use((config) => {
+  if (typeof window !== 'undefined') {
+    const token = localStorage.getItem('nyaypath_proctor_token');
+    if (token && !config.headers.Authorization) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+  }
+  return config;
+});
+
 export const initCase = () => api.post('/api/case/init').then(r => r.data)
 export const classifyCase = (case_id: string, problem_text: string, language: string) => api.post('/api/case/classify', { case_id, problem_text, language }).then(r => r.data)
 export const rtiGenerate = (case_id: string, form_data: any) => api.post('/api/rti/generate', { case_id, form_data }).then(r => r.data)
@@ -88,12 +99,28 @@ export const summarizePrecedent = (case_id?: string, custom_text?: string, langu
 export const downloadCaseBriefPdf = (case_id: string) =>
   api.get(`/api/precedents/${case_id}/pdf`, { responseType: 'blob' }).then(r => r.data)
 
-// College Proctorial & Student Grievance Redressal API
+// =====================================================================
+// College Proctorial & Student Grievance Redressal API (RBAC Secured)
+// =====================================================================
+
+export const loginProctor = (payload: {
+  institution_id: string;
+  access_key: string;
+  role?: string;
+}) => api.post('/api/campus-proctor/auth/login', payload).then(r => r.data)
+
 export const submitCampusGrievance = (payload: any) =>
   api.post('/api/campus-proctor/submit', payload).then(r => r.data)
 
-export const getCampusCase = (case_id: string) =>
-  api.get(`/api/campus-proctor/case/${case_id}`).then(r => r.data)
+export const trackCampusGrievance = (case_id: string, verification_key: string) =>
+  api.post('/api/campus-proctor/track', { case_id, verification_key }).then(r => r.data)
+
+export const getCampusCase = (case_id: string, verification_key?: string) => {
+  const url = verification_key 
+    ? `/api/campus-proctor/case/${case_id}?verification_key=${encodeURIComponent(verification_key)}`
+    : `/api/campus-proctor/case/${case_id}`;
+  return api.get(url).then(r => r.data)
+}
 
 export const listCampusCases = () =>
   api.get('/api/campus-proctor/cases').then(r => r.data)
@@ -101,8 +128,12 @@ export const listCampusCases = () =>
 export const updateCampusCase = (payload: any) =>
   api.post('/api/campus-proctor/update', payload).then(r => r.data)
 
-export const getProctorNotice = (case_id: string) =>
-  api.get(`/api/campus-proctor/notice/${case_id}`).then(r => r.data)
+export const getProctorNotice = (case_id: string, verification_key?: string) => {
+  const url = verification_key
+    ? `/api/campus-proctor/notice/${case_id}?verification_key=${encodeURIComponent(verification_key)}`
+    : `/api/campus-proctor/notice/${case_id}`;
+  return api.get(url).then(r => r.data)
+}
 
 export default api
 

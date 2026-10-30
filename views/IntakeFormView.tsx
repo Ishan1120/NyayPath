@@ -14,8 +14,8 @@ import ClarifyingQuestionsView from '@/components/dashboard/ClarifyingQuestionsV
 const formatAIText = (text?: string) => {
   if (!text) return null;
   const lines = text.split('\n');
-  const result: JSX.Element[] = [];
-  let currentList: JSX.Element[] = [];
+  const result: React.ReactNode[] = [];
+  let currentList: React.ReactNode[] = [];
 
   const pushList = () => {
     if (currentList.length > 0) {

@@ -48,3 +48,9 @@ Thumbs.db
 # Vercel & Turbo
 .vercel
 .turbo
+
+# Local databases & TS build cache
+*.db
+*.sqlite
+*.sqlite3
+*.tsbuildinfo

@@ -43,12 +43,23 @@ try:
         calculate_deadlines,
         calculate_section_20_penalty
     )
-    from precedent_library import precedent_engine
-    from court_news import get_court_news
-    from campus_proctor import campus_proctor_manager, StudentGrievanceSubmit, ProctorUpdateStatus
     from .precedent_library import precedent_engine
     from .court_news import get_court_news
-    from .campus_proctor import campus_proctor_manager, StudentGrievanceSubmit, ProctorUpdateStatus
+    from .campus_proctor import (
+        campus_proctor_manager,
+        StudentGrievanceSubmit,
+        ProctorUpdateStatus,
+        StudentTrackingRequest
+    )
+    from .auth import (
+        AuthUser,
+        UserRole,
+        LoginRequest,
+        authenticate_institutional_user,
+        create_access_token,
+        get_current_user_optional,
+        get_current_authenticated_user
+    )
 except ImportError:
     from precedent_pdf_generator import generate_precedent_case_brief_pdf
     from precedent_library import LANDMARK_PRECEDENTS
@@ -68,6 +79,23 @@ except ImportError:
         run_scheduled_watchdog,
         calculate_deadlines,
         calculate_section_20_penalty
+    )
+    from precedent_library import precedent_engine
+    from court_news import get_court_news
+    from campus_proctor import (
+        campus_proctor_manager,
+        StudentGrievanceSubmit,
+        ProctorUpdateStatus,
+        StudentTrackingRequest
+    )
+    from auth import (
+        AuthUser,
+        UserRole,
+        LoginRequest,
+        authenticate_institutional_user,
+        create_access_token,
+        get_current_user_optional,
+        get_current_authenticated_user
     )
 
 logger = logging.getLogger(__name__)
@@ -769,15 +797,31 @@ def get_case_state(case_id: str):
     return response_payload
 
 @app.get("/api/debug/supabase")
-def debug_supabase():
+def debug_supabase(request: Request):
+    """
+    Restricted diagnostic endpoint.
+    Only accessible by authorized platform administrators or valid CRON_SECRET.
+    Never exposes database URLs, credentials, or internal configuration.
+    """
+    cron_secret = os.environ.get("CRON_SECRET")
+    auth_header = request.headers.get("Authorization", "")
+    is_cron_authorized = bool(cron_secret and auth_header == f"Bearer {cron_secret}")
+    
+    user = get_current_user_optional(request)
+    is_admin_authorized = bool(user and user.role == UserRole.PLATFORM_ADMIN)
+
+    if not (is_cron_authorized or is_admin_authorized):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized: Diagnostic access restricted to authorized administrators."
+        )
+
     from .case_manager import case_manager
-    import os
     return {
-        "use_supabase": case_manager.use_supabase,
-        "has_url_env": bool(os.environ.get("SUPABASE_URL")),
-        "has_key_env": bool(os.environ.get("SUPABASE_KEY")),
-        "url_prefix": os.environ.get("SUPABASE_URL", "")[:20],
-        "memory_case_count": len(case_manager._memory_cases),
+        "status": "active",
+        "service": "NyayPath Case Management Engine",
+        "database_connected": bool(getattr(case_manager, "use_supabase", False)),
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 
@@ -841,32 +885,129 @@ def download_case_brief_pdf(case_id: str):
 # COLLEGE PROCTORIAL & STUDENT GRIEVANCE REDRESSAL SYSTEM
 # =====================================================================
 
+@app.post("/api/campus-proctor/auth/login")
+def proctor_login(payload: LoginRequest):
+    """
+    Authenticates institutional officers (Proctor, Committee Member, Institution Admin).
+    Verifies credentials on the backend and issues an authorized JWT token.
+    Prevents self-assignment of roles.
+    """
+    user = authenticate_institutional_user(payload)
+    if not user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid institutional credentials or unauthorized role requested."
+        )
+    token = create_access_token(user)
+    return {
+        "status": "success",
+        "token": token,
+        "user": {
+            "user_id": user.user_id,
+            "role": user.role.value,
+            "institution_id": user.institution_id,
+            "name": user.name,
+            "email": user.email
+        }
+    }
+
 @app.post("/api/campus-proctor/submit")
-def submit_student_grievance(payload: StudentGrievanceSubmit):
-    created = campus_proctor_manager.create_case(payload)
+def submit_student_grievance(payload: StudentGrievanceSubmit, request: Request):
+    """
+    Submits a student grievance. Open to students and anonymous submitters.
+    Returns case details along with a high-entropy secret verification_key.
+    """
+    student_user = get_current_user_optional(request)
+    created = campus_proctor_manager.create_case(payload, student_user=student_user)
     return {"status": "success", "case": created}
 
+@app.post("/api/campus-proctor/track")
+def track_student_grievance(payload: StudentTrackingRequest):
+    """
+    Verifies high-entropy verification key against stored hash.
+    Case ID alone is insufficient to view private grievance details.
+    """
+    case = campus_proctor_manager.get_case_for_student(
+        case_id=payload.case_id,
+        verification_key=payload.verification_key
+    )
+    return {"status": "success", "case": case}
+
 @app.get("/api/campus-proctor/case/{case_id}")
-def get_campus_case(case_id: str):
-    case = campus_proctor_manager.get_case(case_id)
-    if not case:
-        raise HTTPException(status_code=404, detail="Campus grievance case not found.")
-    return {"case": case}
+def get_campus_case(
+    case_id: str,
+    request: Request,
+    verification_key: Optional[str] = None
+):
+    """
+    Retrieves grievance details. Requires either:
+    1) Student secret verification_key (query param or x-verification-key header)
+    2) Authorized Proctor/Admin token belonging to the case's institution.
+    Rejects unauthorized access.
+    """
+    key = verification_key or request.headers.get("x-verification-key")
+    user = get_current_user_optional(request)
+
+    if user and user.role in [UserRole.PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+        case = campus_proctor_manager.get_case_for_proctor(case_id, user)
+        return {"case": case}
+
+    if key:
+        case = campus_proctor_manager.get_case_for_student(case_id, verification_key=key, student_user=user)
+        return {"case": case}
+
+    if user and user.role == UserRole.STUDENT:
+        case = campus_proctor_manager.get_case_for_student(case_id, student_user=user)
+        return {"case": case}
+
+    raise HTTPException(
+        status_code=401,
+        detail="Unauthorized: Private grievance access requires your student Verification Key or an authorized Proctor session."
+    )
 
 @app.get("/api/campus-proctor/cases")
-def list_campus_cases():
-    return {"cases": campus_proctor_manager.list_all_cases()}
+def list_campus_cases(request: Request):
+    """
+    Protected endpoint: Lists grievances strictly within the proctor's authorized institution.
+    Rejects unauthenticated users (401) and students (403).
+    """
+    user = get_current_authenticated_user(request)
+    if user.role not in [UserRole.PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: Students are not permitted to access the proctorial inquiries queue."
+        )
+    cases = campus_proctor_manager.list_cases_for_proctor(user)
+    return {"cases": cases, "institution_id": user.institution_id}
 
 @app.post("/api/campus-proctor/update")
-def update_campus_case(payload: ProctorUpdateStatus):
-    updated = campus_proctor_manager.update_case(payload)
-    if not updated:
-        raise HTTPException(status_code=404, detail="Case not found.")
+def update_campus_case(payload: ProctorUpdateStatus, request: Request):
+    """
+    Protected endpoint: Updates grievance status and directive.
+    Enforces that proctors can only modify cases belonging to their own institution.
+    """
+    user = get_current_authenticated_user(request)
+    if user.role not in [UserRole.PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: Only authorized proctors or committee members may update case statuses."
+        )
+    updated = campus_proctor_manager.update_case(payload, user)
     return {"status": "success", "case": updated}
 
 @app.get("/api/campus-proctor/notice/{case_id}")
-def generate_proctor_notice(case_id: str):
-    notice_text = campus_proctor_manager.generate_proctorial_notice(case_id)
+def generate_proctor_notice(
+    case_id: str,
+    request: Request,
+    verification_key: Optional[str] = None
+):
+    """
+    Generates formal UGC inquiry notice for the case.
+    Authorized for proctor or student with verification key.
+    """
+    user = get_current_user_optional(request)
+    key = verification_key or request.headers.get("x-verification-key")
+    notice_text = campus_proctor_manager.generate_proctorial_notice(case_id, user=user, verification_key=key)
     return {"case_id": case_id, "notice_text": notice_text}
 
 

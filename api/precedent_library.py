@@ -1,5 +1,5 @@
 """
-JanAdhikar Precedent Library & Legal Knowledge Engine
+NyayPath Precedent Library & Legal Knowledge Engine
 Curated repository of landmark Indian Supreme Court, High Court, CIC, and Student RTI judgments,
 paired with AI Semantic Query Expansion, Intent-Based Relevance Ranking, and Case Summarization.
 """
