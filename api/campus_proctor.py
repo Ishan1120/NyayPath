@@ -424,8 +424,8 @@ class CampusProctorManager:
             "details": payload.proctor_notes or "Status updated by proctorial authority."
         })
 
-        updates = {
-            "status": payload.new_status,
+        # Campus-specific fields (status is authoritatively owned by public.cases)
+        campus_updates = {
             "proctor_notes": payload.proctor_notes if payload.proctor_notes is not None else case.get("proctor_notes"),
             "hearing_date": payload.hearing_date if payload.hearing_date is not None else case.get("hearing_date"),
             "action_taken": payload.action_taken if payload.action_taken is not None else case.get("action_taken"),
@@ -444,8 +444,8 @@ class CampusProctorManager:
                     "updated_at": now_iso
                 }).eq("case_id", clean_id).execute()
 
-                # 2. Update campus-specific fields in public.campus_cases
-                res = self.supabase.table("campus_cases").update(updates).eq("case_id", clean_id).execute()
+                # 2. Update campus-specific fields in public.campus_cases (parent trigger syncs status)
+                res = self.supabase.table("campus_cases").update(campus_updates).eq("case_id", clean_id).execute()
                 if not res.data:
                     raise RuntimeError("Supabase update returned empty.")
                 case = res.data[0]
@@ -453,7 +453,8 @@ class CampusProctorManager:
                 logger.error(f"Supabase UPDATE Error in campus_proctor: {e}")
                 raise HTTPException(status_code=500, detail="Database update failed.")
         else:
-            case.update(updates)
+            case["status"] = payload.new_status
+            case.update(campus_updates)
             self._update_record_sqlite(case)
 
         sanitized = dict(case)

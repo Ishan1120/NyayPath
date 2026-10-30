@@ -164,12 +164,14 @@ BEGIN
 END $$;
 
 -- Synchronization function to ensure atomic parent/child consistency without recursive loops
--- Task 1: public.cases is the authoritative master for common case fields.
+-- Task 1: public.cases is strictly the single source of truth for case status and credentials.
 -- Task 1 Collision Rules:
--- 1. Same UUID and case_id: Pre-created or idempotent parent; safely synchronize or allow.
--- 2. Same case_id with different UUID: REJECT via RAISE EXCEPTION.
--- 3. Same UUID with different case_id: REJECT via RAISE EXCEPTION.
--- 4. Child update attempts to alter id or case_id: REJECT via RAISE EXCEPTION.
+-- 1. Same case_id with different UUID: REJECT via RAISE EXCEPTION.
+-- 2. Same UUID with different case_id: REJECT via RAISE EXCEPTION.
+-- 3. Mismatched case_type: REJECT via RAISE EXCEPTION.
+-- 4. Pre-created or retry parent: Inherit authoritative parent status/credentials; DO NOT overwrite parent.
+-- 5. Child update attempts to alter id or case_id: REJECT via RAISE EXCEPTION.
+-- 6. Child update attempts to independently modify status or credentials: REJECT via RAISE EXCEPTION.
 CREATE OR REPLACE FUNCTION private.sync_campus_case_parent()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -182,7 +184,7 @@ BEGIN
 
     IF TG_OP = 'INSERT' THEN
         -- Check if parent row already exists by id OR case_id
-        SELECT id, case_id INTO v_existing_parent
+        SELECT id, case_id, case_type, status, tracking_key_hash, key_version INTO v_existing_parent
         FROM public.cases
         WHERE id = NEW.id OR case_id = NEW.case_id
         LIMIT 1;
@@ -200,14 +202,17 @@ BEGIN
                     NEW.id, v_existing_parent.case_id, NEW.case_id;
             END IF;
 
-            -- Collision Check 3: Existing parent matches both UUID and case_id (Parent pre-created atomically)
-            UPDATE public.cases
-            SET
-                status = COALESCE(NEW.status, status),
-                tracking_key_hash = COALESCE(NEW.verification_key_hash, tracking_key_hash),
-                key_version = COALESCE(NEW.key_version, key_version),
-                updated_at = timezone('utc'::text, now())
-            WHERE id = NEW.id;
+            -- Collision Check 3: Mismatched case_type -> REJECT!
+            IF v_existing_parent.case_type <> 'CAMPUS_GRIEVANCE' THEN
+                RAISE EXCEPTION 'Case type collision: Parent case % is classified as %, cannot attach as child CAMPUS_GRIEVANCE',
+                    v_existing_parent.case_id, v_existing_parent.case_type;
+            END IF;
+
+            -- Collision Check 4: Existing parent matches UUID, case_id, and case_type (Idempotent intake / retry)
+            -- Strictly inherit authoritative parent values without overwriting with stale child data
+            NEW.status := v_existing_parent.status;
+            NEW.verification_key_hash := v_existing_parent.tracking_key_hash;
+            NEW.key_version := v_existing_parent.key_version;
 
             RETURN NEW;
         ELSE
@@ -236,7 +241,7 @@ BEGIN
         END IF;
 
     ELSIF TG_OP = 'UPDATE' THEN
-        -- Collision Check 4: Child update attempts to modify parent identifiers -> REJECT!
+        -- Collision Check 5: Child update attempts to modify parent identifiers -> REJECT!
         IF NEW.id IS DISTINCT FROM OLD.id THEN
             RAISE EXCEPTION 'Parent identifier immutability violation: campus_cases.id cannot be altered (attempted % -> %)',
                 OLD.id, NEW.id;
@@ -247,19 +252,15 @@ BEGIN
                 OLD.case_id, NEW.case_id;
         END IF;
 
-        -- For backward compatibility with existing legacy queries updating campus_cases:
-        -- Keep authoritative parent synchronized if status or credentials were updated directly on child
-        IF NEW.status IS DISTINCT FROM OLD.status OR
-           NEW.verification_key_hash IS DISTINCT FROM OLD.verification_key_hash OR
+        -- Check 6: Enforce one-way authority. Child cannot independently modify parent-owned fields.
+        -- When pg_trigger_depth() = 1, this is an update targeting campus_cases directly.
+        IF NEW.status IS DISTINCT FROM OLD.status THEN
+            RAISE EXCEPTION 'Parent authority violation: Status is authoritatively owned by public.cases and cannot be modified via child campus_cases table. Update public.cases instead.';
+        END IF;
+
+        IF NEW.verification_key_hash IS DISTINCT FROM OLD.verification_key_hash OR
            NEW.key_version IS DISTINCT FROM OLD.key_version THEN
-            
-            UPDATE public.cases
-            SET
-                status = NEW.status,
-                tracking_key_hash = NEW.verification_key_hash,
-                key_version = NEW.key_version,
-                updated_at = timezone('utc'::text, now())
-            WHERE id = NEW.id;
+            RAISE EXCEPTION 'Parent authority violation: Tracking credentials are authoritatively owned by public.cases and cannot be modified via child campus_cases table.';
         END IF;
 
         RETURN NEW;
@@ -538,17 +539,38 @@ CREATE POLICY "Authenticated users can view attachments for their cases"
     );
 
 -- =====================================================================
--- 11. PUBLIC.CASE_ACTIVITY_LOG (Immutable Audit Trail)
+-- 11. PUBLIC.AUDIT_ACTOR_MAPPINGS (Pseudonymous Audit Identity Vault - Task 2)
 -- =====================================================================
--- Task 2 & Task 4: authenticated has SELECT only; INSERT restricted to service_role.
--- Foreign keys use ON DELETE RESTRICT to avoid conflicting with the immutability trigger.
+-- Connects stable pseudonymous audit_actor_id to auth.users(id).
+-- Approved erasure removes the mapping row, permanently unlinking historical events without modifying them.
+-- Avoids fabricated users in auth.users while preventing FK deletion conflicts on immutable logs.
+
+CREATE TABLE IF NOT EXISTS public.audit_actor_mappings (
+    audit_actor_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID UNIQUE NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_actor_user ON public.audit_actor_mappings(user_id);
+
+ALTER TABLE public.audit_actor_mappings ENABLE ROW LEVEL SECURITY;
+
+-- Mapping table is strictly backend-only (service_role)
+REVOKE ALL PRIVILEGES ON public.audit_actor_mappings FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.audit_actor_mappings TO service_role;
+
+-- =====================================================================
+-- 12. PUBLIC.CASE_ACTIVITY_LOG (Immutable Audit Trail)
+-- =====================================================================
+-- Task 2: References stable pseudonymous audit_actor_id (not auth.users directly).
+-- Approved erasure severs identity in public.audit_actor_mappings without touching immutable log rows.
 -- action_details strictly contains operational telemetry (NEVER personal PII or raw credentials).
 
 CREATE TABLE IF NOT EXISTS public.case_activity_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     case_uuid UUID NOT NULL REFERENCES public.cases(id) ON DELETE RESTRICT,
     case_id VARCHAR(64) NOT NULL,
-    actor_id UUID REFERENCES auth.users(id) ON DELETE RESTRICT,
+    audit_actor_id UUID,
     actor_role VARCHAR(32) NOT NULL,
     action_type VARCHAR(64) NOT NULL,
     action_details JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -558,6 +580,7 @@ CREATE TABLE IF NOT EXISTS public.case_activity_log (
 
 CREATE INDEX IF NOT EXISTS idx_case_activity_case ON public.case_activity_log(case_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_case_activity_uuid ON public.case_activity_log(case_uuid, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_case_activity_actor ON public.case_activity_log(audit_actor_id);
 
 ALTER TABLE public.case_activity_log ENABLE ROW LEVEL SECURITY;
 
@@ -574,8 +597,12 @@ CREATE POLICY "Officers and users can view authorized activity logs"
         -- 1. Platform admins can view all activity logs
         private.is_platform_admin()
         OR
-        -- 2. Actors can view their own logged actions
-        actor_id = auth.uid()
+        -- 2. Authenticated users can view actions associated with their active audit_actor_id
+        audit_actor_id IN (
+            SELECT aam.audit_actor_id
+            FROM public.audit_actor_mappings aam
+            WHERE aam.user_id = auth.uid()
+        )
         OR
         -- 3. Officers can view logs for cases belonging to their authorized institution UUID
         EXISTS (
@@ -600,7 +627,7 @@ CREATE TRIGGER trg_immutable_case_activity_log
     FOR EACH ROW EXECUTE FUNCTION private.prevent_audit_log_modification();
 
 -- =====================================================================
--- 12. PUBLIC.LEGAL_PRECEDENTS (Curated Legal Intelligence)
+-- 13. PUBLIC.LEGAL_PRECEDENTS (Curated Legal Intelligence)
 -- =====================================================================
 -- Consumer: api/precedent_library.py
 
@@ -658,38 +685,39 @@ CREATE POLICY "Users can manage own saved research"
     WITH CHECK (user_id = auth.uid());
 
 -- =====================================================================
--- 14. PRIVATE STORAGE BUCKET FOR CASE DOCUMENTS (Task 3 & 8)
+-- 15. PRIVATE STORAGE BUCKET FOR CASE DOCUMENTS (Task 5)
 -- =====================================================================
--- Idempotently creates private bucket 'case_documents' if Supabase storage schema exists
+-- Idempotently creates private bucket 'case-documents' if Supabase storage schema exists
 
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'storage') THEN
         INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
         VALUES (
-            'case_documents',
-            'case_documents',
-            FALSE, -- Private bucket
+            'case-documents',
+            'case-documents',
+            FALSE, -- Strictly private bucket
             10485760, -- 10MB maximum file size limit
-            ARRAY['application/pdf', 'image/jpeg', 'image/png']
+            ARRAY['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
         )
         ON CONFLICT (id) DO UPDATE SET
             public = FALSE,
-            file_size_limit = 10485760;
+            file_size_limit = 10485760,
+            allowed_mime_types = ARRAY['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
 
         -- Authenticated users can view authorized attachments
         DROP POLICY IF EXISTS "Authenticated users view case attachments" ON storage.objects;
         CREATE POLICY "Authenticated users view case attachments"
             ON storage.objects FOR SELECT
             TO authenticated
-            USING (bucket_id = 'case_documents');
+            USING (bucket_id = 'case-documents');
 
         -- Backend service_role manages attachments
         DROP POLICY IF EXISTS "Service role manages case attachments" ON storage.objects;
         CREATE POLICY "Service role manages case attachments"
             ON storage.objects FOR ALL
             TO service_role
-            USING (bucket_id = 'case_documents')
-            WITH CHECK (bucket_id = 'case_documents');
+            USING (bucket_id = 'case-documents')
+            WITH CHECK (bucket_id = 'case-documents');
     END IF;
 END $$;

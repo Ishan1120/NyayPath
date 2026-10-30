@@ -1279,26 +1279,28 @@ assert "private.sync_campus_case_parent()" in mig_004_sql, (
 )
 print("  [PASS] [Static SQL Inspection] Campus cases are strictly linked to parent cases via enforceable FK and sync trigger.")
 
-print("[Test 17.3] [Static SQL Inspection] Audit log deletion conflict resolved with ON DELETE RESTRICT (Task 4)")
-# Ensure case_activity_log avoids ON DELETE SET NULL which conflicts with the immutability trigger
+print("[Test 17.3] [Static SQL Inspection] Pseudonymous Audit Identity & Immutable Audit Log (Task 2)")
+assert "audit_actor_id UUID" in mig_004_sql, (
+    "case_activity_log must use pseudonymous audit_actor_id"
+)
+assert "CREATE TABLE IF NOT EXISTS public.audit_actor_mappings" in mig_004_sql, (
+    "Migration 004 must declare public.audit_actor_mappings vault"
+)
+assert "user_id UUID UNIQUE NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE" in mig_004_sql, (
+    "audit_actor_mappings.user_id must reference auth.users(id) with ON DELETE CASCADE"
+)
 assert "case_uuid UUID NOT NULL REFERENCES public.cases(id) ON DELETE RESTRICT" in mig_004_sql, (
-    "case_activity_log.case_uuid must use ON DELETE RESTRICT to prevent trigger conflict"
+    "case_activity_log.case_uuid must use ON DELETE RESTRICT to preserve case audit linkage"
 )
-assert "actor_id UUID REFERENCES auth.users(id) ON DELETE RESTRICT" in mig_004_sql, (
-    "case_activity_log.actor_id must use ON DELETE RESTRICT to prevent trigger conflict"
-)
-assert "ON DELETE SET NULL" not in mig_004_sql.split("public.case_activity_log")[1].split(");")[0], (
-    "case_activity_log must NOT use ON DELETE SET NULL"
-)
-print("  [PASS] [Static SQL Inspection] Audit log foreign keys use ON DELETE RESTRICT; zero deletion/update conflict.")
+print("  [PASS] [Static SQL Inspection] Pseudonymous audit identities decoupled from auth.users; zero deletion conflict.")
 
 print("[Test 17.4] [Static SQL Inspection] Audit log read isolation for case owners, officers & admins (Task 4)")
 audit_policy_section = mig_004_sql.split("CREATE POLICY \"Officers and users can view authorized activity logs\"")[1].split(";")[0]
 assert "private.is_platform_admin()" in audit_policy_section, (
     "Audit log policy must permit platform admins"
 )
-assert "actor_id = auth.uid()" in audit_policy_section, (
-    "Audit log policy must permit actor to view own actions"
+assert "audit_actor_id IN" in audit_policy_section, (
+    "Audit log policy must permit actor to view own actions via audit_actor_mappings lookup"
 )
 assert "private.can_officer_access_case(cc.institution_uuid)" in audit_policy_section, (
     "Audit log policy must permit only authorized institutional officers using UUID comparison"
@@ -1370,10 +1372,19 @@ assert "Case ID collision" in sync_fn_sql, (
 assert "UUID collision" in sync_fn_sql, (
     "sync_campus_case_parent must reject duplicate UUID with different case_id"
 )
+assert "Case type collision" in sync_fn_sql, (
+    "sync_campus_case_parent must reject mismatched case_type collisions"
+)
 assert "Parent identifier immutability violation" in sync_fn_sql, (
     "sync_campus_case_parent must reject updates that alter campus_cases.id or case_id"
 )
-print("  [PASS] [Static SQL Inspection] Collision detection rules (1-4) prevent ID mutation and duplicate key collisions.")
+assert "Parent authority violation" in sync_fn_sql, (
+    "sync_campus_case_parent must reject child updates attempting to modify status or credentials"
+)
+assert "NEW.status := v_existing_parent.status" in sync_fn_sql, (
+    "sync_campus_case_parent must inherit existing parent status without stale child overwrites"
+)
+print("  [PASS] [Static SQL Inspection] Collision detection rules (1-6) prevent ID mutation, duplicate key collisions, and stale overwrites.")
 
 print("[Test 18.3] [Static SQL Inspection] Zero-Seed Policy for Production Institutions (Task 2)")
 assert "INSERT INTO public.institutions" not in mig_004_sql, (
@@ -1393,6 +1404,18 @@ assert '"status": payload.new_status' in proctor_code, (
     "campus_proctor.py update_case must write new_status to parent cases table"
 )
 print("  [PASS] [Unit/Static] Campus Proctor workflow updates authoritative parent cases table.")
+
+print("[Test 18.5] [Static SQL Inspection] Canonical Storage Bucket Configuration (Task 5)")
+assert "'case-documents'" in mig_004_sql, (
+    "Migration 004 must configure canonical bucket 'case-documents'"
+)
+assert "10485760" in mig_004_sql, (
+    "Storage bucket must enforce 10MB file size limit"
+)
+assert "application/pdf" in mig_004_sql, (
+    "Storage bucket must restrict MIME types to permitted documents and images"
+)
+print("  [PASS] [Static SQL Inspection] Canonical private storage bucket 'case-documents' configured with size and MIME restrictions.")
 
 print("\n" + "=" * 70)
 print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 + 1.3.7 TESTS COMPLETED SUCCESSFULLY!")
