@@ -69,7 +69,8 @@ export default function CampusProctorPage() {
   const [proctorToken, setProctorToken] = useState<string | null>(null);
   const [proctorUser, setProctorUser] = useState<any | null>(null);
   const [loginInstitutionId, setLoginInstitutionId] = useState('INST_DEFAULT');
-  const [loginAccessKey, setLoginAccessKey] = useState('');
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [loginRole, setLoginRole] = useState('proctor');
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -127,13 +128,14 @@ export default function CampusProctorPage() {
 
   const handleProctorLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!loginAccessKey.trim()) return;
+    if (!loginEmail.trim() || !loginPassword.trim()) return;
     setLoginLoading(true);
     setLoginError(null);
     try {
       const res = await loginProctor({
+        email: loginEmail.trim().toLowerCase(),
+        password: loginPassword,
         institution_id: loginInstitutionId.trim().toUpperCase(),
-        access_key: loginAccessKey.trim(),
         role: loginRole
       });
       if (res?.token && res?.user) {
@@ -143,10 +145,14 @@ export default function CampusProctorPage() {
         localStorage.setItem('nyaypath_proctor_user', JSON.stringify(res.user));
         loadProctorCases();
       } else {
-        setLoginError('Authentication failed: Invalid credentials.');
+        setLoginError('Authentication failed: Invalid officer credentials.');
       }
     } catch (err: any) {
-      setLoginError(err?.response?.data?.detail || 'Invalid institutional credentials or unauthorized role requested.');
+      if (err?.response?.status === 429) {
+        setLoginError(err?.response?.data?.detail || 'Too many failed login attempts. Access temporarily locked. Please try again later.');
+      } else {
+        setLoginError(err?.response?.data?.detail || 'Invalid officer credentials or unauthorized role requested.');
+      }
     } finally {
       setLoginLoading(false);
     }
@@ -738,18 +744,27 @@ export default function CampusProctorPage() {
                   </div>
 
                   <div>
-                    <label className="block text-xs font-bold text-slate-700 mb-1">Institutional Access Key / Passkey</label>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Official Institutional Email</label>
                     <input
-                      type="password"
-                      value={loginAccessKey}
-                      onChange={(e) => setLoginAccessKey(e.target.value)}
-                      placeholder="Enter official institutional passkey"
+                      type="email"
+                      value={loginEmail}
+                      onChange={(e) => setLoginEmail(e.target.value)}
+                      placeholder="officer@institution.edu"
                       className="w-full p-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl font-medium focus:border-court-maroon focus:outline-none"
                       required
                     />
-                    <span className="text-[10px] text-slate-400 block mt-1">
-                      Demo proctor key: <code className="bg-slate-100 px-1 py-0.5 rounded font-mono text-court-maroon font-bold">proctor-nyaypath-2026</code>
-                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 mb-1">Individual Account Password</label>
+                    <input
+                      type="password"
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      placeholder="Enter your individual password"
+                      className="w-full p-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl font-medium focus:border-court-maroon focus:outline-none"
+                      required
+                    />
                   </div>
 
                   {loginError && (
@@ -761,7 +776,7 @@ export default function CampusProctorPage() {
 
                   <button
                     type="submit"
-                    disabled={loginLoading || !loginAccessKey.trim()}
+                    disabled={loginLoading || !loginEmail.trim() || !loginPassword.trim()}
                     className="w-full py-3 rounded-xl bg-ashoka-navy hover:bg-slate-900 text-white font-bold text-xs tracking-tight shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 transition-all"
                   >
                     {loginLoading ? <Loader2 size={15} className="animate-spin" /> : <UserCheck size={15} />}

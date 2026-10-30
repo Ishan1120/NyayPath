@@ -51,10 +51,12 @@ try:
         ProctorUpdateStatus,
         StudentTrackingRequest
     )
+    from .rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from .auth import (
         AuthUser,
         UserRole,
         LoginRequest,
+        authenticate_officer,
         authenticate_institutional_user,
         create_access_token,
         get_current_user_optional,
@@ -88,10 +90,12 @@ except ImportError:
         ProctorUpdateStatus,
         StudentTrackingRequest
     )
+    from rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from auth import (
         AuthUser,
         UserRole,
         LoginRequest,
+        authenticate_officer,
         authenticate_institutional_user,
         create_access_token,
         get_current_user_optional,
@@ -886,18 +890,30 @@ def download_case_brief_pdf(case_id: str):
 # =====================================================================
 
 @app.post("/api/campus-proctor/auth/login")
-def proctor_login(payload: LoginRequest):
+def proctor_login(payload: LoginRequest, request: Request):
     """
     Authenticates institutional officers (Proctor, Committee Member, Institution Admin).
-    Verifies credentials on the backend and issues an authorized JWT token.
-    Prevents self-assignment of roles.
+    Verifies individual credentials and issues an authorized JWT token.
+    Enforces persistent rate limiting on failed attempts.
     """
-    user = authenticate_institutional_user(payload)
+    email_key = (payload.email or "").strip().lower()
+    if payload.access_key and not (payload.email and payload.password):
+        record_rate_limit_failure(request, action="login", target_id="legacy_passkey", max_attempts=5, window_seconds=900, cooldown_seconds=900)
+        raise HTTPException(
+            status_code=401,
+            detail="Shared passkeys have been permanently decommissioned. Please authenticate using your individual institutional email and password."
+        )
+
+    enforce_rate_limit(request, action="login", target_id=email_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+
+    user = authenticate_officer(payload)
     if not user:
+        record_rate_limit_failure(request, action="login", target_id=email_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
         raise HTTPException(
             status_code=401,
             detail="Invalid institutional credentials or unauthorized role requested."
         )
+    reset_rate_limit(request, action="login", target_id=email_key)
     token = create_access_token(user)
     return {
         "status": "success",
@@ -922,16 +938,26 @@ def submit_student_grievance(payload: StudentGrievanceSubmit, request: Request):
     return {"status": "success", "case": created}
 
 @app.post("/api/campus-proctor/track")
-def track_student_grievance(payload: StudentTrackingRequest):
+def track_student_grievance(payload: StudentTrackingRequest, request: Request):
     """
     Verifies high-entropy verification key against stored hash.
     Case ID alone is insufficient to view private grievance details.
+    Enforces rate limiting to prevent key brute-forcing.
     """
-    case = campus_proctor_manager.get_case_for_student(
-        case_id=payload.case_id,
-        verification_key=payload.verification_key
-    )
-    return {"status": "success", "case": case}
+    case_key = (payload.case_id or "").strip().upper()
+    enforce_rate_limit(request, action="track", target_id=case_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+
+    try:
+        case = campus_proctor_manager.get_case_for_student(
+            case_id=payload.case_id,
+            verification_key=payload.verification_key
+        )
+        reset_rate_limit(request, action="track", target_id=case_key)
+        return {"status": "success", "case": case}
+    except HTTPException as e:
+        if e.status_code in (401, 403, 404):
+            record_rate_limit_failure(request, action="track", target_id=case_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+        raise e
 
 @app.get("/api/campus-proctor/case/{case_id}")
 def get_campus_case(
@@ -943,23 +969,36 @@ def get_campus_case(
     Retrieves grievance details. Requires either:
     1) Student secret verification_key (query param or x-verification-key header)
     2) Authorized Proctor/Admin token belonging to the case's institution.
-    Rejects unauthorized access.
+    Rejects unauthorized access and rate-limits verification key attempts.
     """
     key = verification_key or request.headers.get("x-verification-key")
     user = get_current_user_optional(request)
 
+    # 1. Proctor or administrative officer
     if user and user.role in [UserRole.PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
         case = campus_proctor_manager.get_case_for_proctor(case_id, user)
         return {"case": case}
 
-    if key:
-        case = campus_proctor_manager.get_case_for_student(case_id, verification_key=key, student_user=user)
-        return {"case": case}
+    norm_case_id = (case_id or "").strip().upper()
+    enforce_rate_limit(request, action="case", target_id=norm_case_id, max_attempts=5, window_seconds=900, cooldown_seconds=900)
 
+    # 2. Student with verification key
+    if key:
+        try:
+            case = campus_proctor_manager.get_case_for_student(case_id, verification_key=key, student_user=user)
+            reset_rate_limit(request, action="case", target_id=norm_case_id)
+            return {"case": case}
+        except HTTPException as e:
+            if e.status_code in (401, 403, 404):
+                record_rate_limit_failure(request, action="case", target_id=norm_case_id, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+            raise e
+
+    # 3. Authenticated student matching student_user_id
     if user and user.role == UserRole.STUDENT:
         case = campus_proctor_manager.get_case_for_student(case_id, student_user=user)
         return {"case": case}
 
+    record_rate_limit_failure(request, action="case", target_id=norm_case_id, max_attempts=5, window_seconds=900, cooldown_seconds=900)
     raise HTTPException(
         status_code=401,
         detail="Unauthorized: Private grievance access requires your student Verification Key or an authorized Proctor session."

@@ -1,8 +1,11 @@
 """
 NyayPath College Proctor & Student Grievance Redressal Engine
-Dual-interface system for college students and the Proctorial / Grievance Redressal Committee.
-Tracks campus issues, enforces UGC 15-day resolution SLA, and generates Proctorial Notices / Action Taken Reports.
-Persistently backed by Supabase PostgreSQL (with on-disk persistent fallback for local testing).
+Remediated for Phase 1.2:
+- Strict production database persistence (zero silent SQLite fallback in production).
+- 128-bit Verification Keys with constant-time SHA-256 verification.
+- Complete anonymous privacy: student_user_id is strictly NULL, student_name and roll_number omitted.
+- Valid UUID enforcement on student_user_id foreign keys (never invalid string IDs).
+- Scoped Supabase database operations.
 """
 
 import os
@@ -20,21 +23,43 @@ try:
 except ImportError:
     create_client, Client = None, None
 
-from .auth import (
-    AuthUser,
-    UserRole,
-    generate_secure_verification_key,
-    hash_verification_key,
-    verify_tracking_credential,
-    verify_institutional_boundary
-)
+try:
+    from .auth import (
+        AuthUser,
+        UserRole,
+        generate_secure_verification_key,
+        hash_verification_key,
+        verify_tracking_credential,
+        verify_institutional_boundary
+    )
+    from .rate_limiter import enforce_rate_limit, rate_limiter
+except ImportError:
+    from auth import (
+        AuthUser,
+        UserRole,
+        generate_secure_verification_key,
+        hash_verification_key,
+        verify_tracking_credential,
+        verify_institutional_boundary
+    )
+    from rate_limiter import enforce_rate_limit, rate_limiter
 
 logger = logging.getLogger(__name__)
 
+def is_valid_uuid(val: Optional[str]) -> bool:
+    """Validates whether a string is a standard RFC 4122 UUID."""
+    if not val:
+        return False
+    try:
+        uuid_obj = uuid.UUID(str(val))
+        return str(uuid_obj) == str(val).lower()
+    except Exception:
+        return False
+
 class StudentGrievanceSubmit(BaseModel):
     institution_id: Optional[str] = "INST_DEFAULT"
-    student_name: Optional[str] = "Anonymous Student"
-    roll_number: Optional[str] = "Confidential"
+    student_name: Optional[str] = None
+    roll_number: Optional[str] = None
     department: str
     year: str
     category: str
@@ -60,7 +85,7 @@ class StudentTrackingRequest(BaseModel):
     verification_key: str
 
 # =====================================================================
-# Persistent Storage Manager for Campus Cases
+# Persistent Storage Manager for Campus Cases (Remediated)
 # =====================================================================
 
 class CampusProctorManager:
@@ -72,6 +97,22 @@ class CampusProctorManager:
         self.supabase: Optional[Client] = None
         self._local_db_path = os.environ.get("CAMPUS_SQLITE_DB", "campus_cases_persistent.db")
 
+        is_production = (
+            os.environ.get("VERCEL") == "1" or
+            os.environ.get("NODE_ENV") == "production" or
+            os.environ.get("ENV") == "production" or
+            os.environ.get("ENVIRONMENT") == "production"
+        )
+        explicit_allow = os.environ.get("ALLOW_LOCAL_SQLITE")
+        explicit_test = os.environ.get("TEST_MODE")
+
+        if explicit_allow == "0" or explicit_test == "0":
+            self.allow_local_sqlite = False
+        elif explicit_allow == "1" or explicit_test == "1":
+            self.allow_local_sqlite = True
+        else:
+            self.allow_local_sqlite = not is_production
+
         if self.use_supabase:
             try:
                 self.supabase = create_client(url, key)
@@ -81,8 +122,11 @@ class CampusProctorManager:
                 self.use_supabase = False
                 self.supabase = None
         else:
-            logger.info(f"Supabase credentials not configured. Using local persistent disk storage at '{self._local_db_path}'.")
-            self._init_sqlite_db()
+            if self.allow_local_sqlite:
+                logger.info(f"Supabase credentials not configured. Local test SQLite enabled at '{self._local_db_path}'.")
+                self._init_sqlite_db()
+            else:
+                logger.warning("Supabase credentials not configured and ALLOW_LOCAL_SQLITE=0. Production database persistence is strictly enforced.")
 
     def _init_sqlite_db(self):
         """Initializes persistent disk-backed database schema for local dev/testing."""
@@ -129,17 +173,20 @@ class CampusProctorManager:
             logger.error(f"Failed to initialize local SQLite persistent DB: {e}")
 
     def _ensure_connected(self):
-        """Validates that a persistent database is ready. Raises 503 if unavailable."""
+        """
+        Validates that persistent storage is available.
+        In production, raises HTTP 503 if Supabase is disconnected.
+        """
         if self.use_supabase and self.supabase is not None:
             return
-        if os.environ.get("STRICT_SUPABASE_ONLY") == "1":
+        if not self.allow_local_sqlite:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Database unavailable: Supabase credentials required for permanent grievance persistence."
+                detail="Database unavailable: Persistent Supabase database connection required. Ephemeral storage is strictly disabled in production."
             )
 
     # -----------------------------------------------------------------
-    # Case Submission (Student Workflow)
+    # Case Submission (Student Workflow - Task 4, 5, 7)
     # -----------------------------------------------------------------
     def create_case(
         self,
@@ -147,8 +194,10 @@ class CampusProctorManager:
         student_user: Optional[AuthUser] = None
     ) -> Dict[str, Any]:
         """
-        Registers a new grievance with unique Case ID and high-entropy verification key.
-        Persists directly to database (Supabase or disk-backed store).
+        Registers a new grievance with unique Case ID and 128-bit verification key.
+        - If anonymous: student_user_id is strictly NULL, student_name & roll_number are omitted.
+        - If authenticated & not anonymous: student_user_id is verified as genuine UUID.
+        - Strictly persists to Supabase (or local SQLite if explicitly enabled in dev/test).
         """
         self._ensure_connected()
 
@@ -156,7 +205,7 @@ class CampusProctorManager:
         dept_code = payload.department[:2].upper() if payload.department else "GR"
         case_id = f"CAMPUS-{raw_code}-{dept_code}"
         
-        # High-entropy secret for anonymous verification
+        # Genuine 128-bit random verification key (32 hex characters)
         verification_key = generate_secure_verification_key()
         verification_hash = hash_verification_key(verification_key)
 
@@ -173,10 +222,25 @@ class CampusProctorManager:
         else:
             severity = "NORMAL"
 
+        # Task 7: Strict Anonymous Privacy
+        is_anon = bool(payload.is_anonymous)
+        if is_anon:
+            # Strictly decouple from student account identity
+            student_uid = None
+            student_name = None
+            roll_number = None
+            history_actor = "Anonymous Student"
+        else:
+            # Confidential / Non-anonymous
+            student_uid = student_user.user_id if (student_user and is_valid_uuid(student_user.user_id)) else None
+            student_name = payload.student_name or "Confidential Student"
+            roll_number = payload.roll_number or "Protected"
+            history_actor = student_name
+
         initial_history = [{
             "timestamp": now_iso,
             "action": "GRIEVANCE_REGISTERED",
-            "actor": "Complainant (Student)",
+            "actor": history_actor,
             "details": "Grievance submitted under UGC Student Grievance Regulations."
         }]
 
@@ -184,16 +248,16 @@ class CampusProctorManager:
             "id": str(uuid.uuid4()),
             "case_id": case_id,
             "institution_id": (payload.institution_id or "INST_DEFAULT").strip().upper(),
-            "student_user_id": student_user.user_id if student_user else None,
-            "student_name": "Confidential Student" if payload.is_anonymous else payload.student_name,
-            "roll_number": "Protected" if payload.is_anonymous else payload.roll_number,
+            "student_user_id": student_uid,
+            "student_name": student_name,
+            "roll_number": roll_number,
             "department": payload.department,
             "year": payload.year,
             "category": payload.category,
             "subject": payload.subject,
             "description": payload.description,
             "incident_date": payload.incident_date or now.strftime("%Y-%m-%d"),
-            "is_anonymous": bool(payload.is_anonymous),
+            "is_anonymous": is_anon,
             "confidentiality_mode": payload.confidentiality_mode or "CONFIDENTIAL",
             "severity": severity,
             "status": "SUBMITTED",
@@ -224,18 +288,18 @@ class CampusProctorManager:
                     detail=f"Database persistence failure: {str(e)}"
                 )
         else:
-            # 2. Local Persistent Disk Storage
+            # 2. Local Persistent SQLite (dev/testing only)
             self._save_record_sqlite(record)
 
         # Return record to student along with the plaintext verification key
         result = dict(record)
         result["verification_key"] = verification_key
-        # Omit internal hash from student response
+        # Never expose hash or raw internal fields
         result.pop("verification_key_hash", None)
         return result
 
     # -----------------------------------------------------------------
-    # Student Grievance Lookup (Protected by Verification Key)
+    # Student Grievance Lookup (Protected by 128-Bit Verification Key)
     # -----------------------------------------------------------------
     def get_case_for_student(
         self,
@@ -246,11 +310,15 @@ class CampusProctorManager:
         """
         Securely retrieves grievance for student.
         Enforces verification key match OR student user ID ownership.
+        Uniform error message prevents Case ID enumeration attacks.
         """
         clean_id = (case_id or "").strip().upper()
         case = self._fetch_raw_case(clean_id)
         if not case:
-            raise HTTPException(status_code=404, detail="Campus grievance case not found.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Grievance not found. Please verify the Case ID."
+            )
 
         # Check authorization
         authorized = False
@@ -307,7 +375,6 @@ class CampusProctorManager:
         else:
             cases = self._list_cases_sqlite(proctor_user.institution_id, is_admin=(proctor_user.role == UserRole.PLATFORM_ADMIN))
 
-        # Sanitize sensitive hashes from list output
         for c in cases:
             c.pop("verification_key_hash", None)
 
@@ -383,9 +450,6 @@ class CampusProctorManager:
         elif verification_key:
             if not verify_tracking_credential(verification_key, case.get("verification_key_hash", "")):
                 raise HTTPException(status_code=403, detail="Invalid verification key for this notice.")
-        else:
-            # If called without credentials, sanitize complainant identity
-            pass
 
         notice = f"""OFFICE OF THE CHIEF PROCTOR & STUDENT GRIEVANCE REDRESSAL CELL
 ================================================================================
@@ -397,7 +461,7 @@ Statutory Mandate: UGC (Grievance Redressal of Students) Regulations, 2023
 
 1. CASE IDENTIFIER & COMPLAINANT PARTICULARS:
    - Case Reference ID : {case['case_id']}
-   - Complainant Name  : {case.get('student_name', 'Protected Complainant')}
+   - Complainant Name  : {case.get('student_name') or 'Anonymous / Protected Complainant'}
    - Department / Year : {case['department']} ({case['year']})
    - Case Category     : {case['category']} (Severity: {case['severity']})
    - Current Status    : {case['status']}

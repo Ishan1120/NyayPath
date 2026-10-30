@@ -104,8 +104,10 @@ export const downloadCaseBriefPdf = (case_id: string) =>
 // =====================================================================
 
 export const loginProctor = (payload: {
-  institution_id: string;
-  access_key: string;
+  email?: string;
+  password?: string;
+  institution_id?: string;
+  access_key?: string;
   role?: string;
 }) => api.post('/api/campus-proctor/auth/login', payload).then(r => r.data)
 

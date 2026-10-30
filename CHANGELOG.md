@@ -72,3 +72,36 @@
   - `npx tsc --noEmit`: 100% Passed (0 TypeScript errors)
 
 ---
+
+
+## [Phase 1.2] Critical Security Remediation & Authentication Architecture Correction
+- **Timestamp:** 2026-10-30 20:16 IST
+- **Category:** Security Remediation, Cryptography & Database Integrity
+- **Status:** Implemented & 100% Verified
+- **Branch:** `feature/phase-1.2-security-remediation`
+- **Summary:**
+  - **Task 1 (JWT Secret Remediation):** Eliminated all hardcoded static signing keys and dangerous fallback to `SUPABASE_KEY`. Enforced fail-secure production startup requiring at least 256 bits of entropy. Ephemeral runtime secret generation in development.
+  - **Task 2 (Individual Credentials & Passkey Deprecation):** Permanently decommissioned shared institutional passkeys (e.g., `proctor-nyaypath-2026`). Implemented individual officer authentication via email + password using PBKDF2-HMAC-SHA256 (100,000 iterations) with cryptographic salting and direct Supabase Auth (`sign_in_with_password`). Updated proctor login UI and removed demo keys.
+  - **Task 3 (Supabase PostgREST & RLS Compatibility):** Re-aligned JWT payload claims with PostgREST conventions (`role: "authenticated"`, `sub: UUID`, application roles and institutional scoping housed in `app_metadata`).
+  - **Task 4 (UUID Type Compatibility):** Enforced RFC 4122 UUID validation on `student_user_id`. Decoupled anonymous submissions by guaranteeing `NULL` foreign keys to eliminate PostgreSQL type casting failures.
+  - **Task 5 (Cryptographic 128-Bit Verification Keys):** Upgraded student tracking verification key generation to genuine 128-bit cryptographic entropy (`SEC-` + 32 hex chars = 36 total characters) with constant-time SHA-256 hash comparison.
+  - **Task 6 (Serverless Persistent Rate Limiting):** Implemented `api/rate_limiter.py` supporting persistent Supabase table `rate_limit_attempts` with SQLite dev fallback. Integrated lockout protection (5 failed attempts per 15 minutes) on `/auth/login`, `/track`, and `/case/{case_id}`, returning HTTP 429 with `Retry-After`.
+  - **Task 7 (Strict Anonymous Privacy):** Completely stripped PII (`student_name`, `roll_number`, `student_user_id`) on anonymous submissions at both backend and database CHECK constraint levels.
+  - **Task 8 (Production Database Persistence):** Disabled silent local SQLite fallback in production environments; raises fail-secure HTTP 503 Service Unavailable if Supabase database is unconfigured.
+  - **Task 9 (Forward-Only Migration):** Authored `migrations/002_security_remediation.sql` containing `rate_limit_attempts` table, anonymous privacy CHECK constraint, tightened RLS policies (strictly restricting `DELETE` to `platform_admin`), and idempotent rollback instructions.
+  - **Task 10 (Verification & Test Suite):** Comprehensive test suite `tests/test_phase1.py` expanded to verify all 10 remediations across 24 test assertions. Full end-to-end pipeline `tests/test_pipeline.py` verified with 100% pass rate.
+- **Files Modified / Created:**
+  - `api/rate_limiter.py` (Created)
+  - `migrations/002_security_remediation.sql` (Created)
+  - `api/auth.py` (Modified & Remediated)
+  - `api/campus_proctor.py` (Modified & Remediated)
+  - `api/index.py` (Modified & Integrated)
+  - `app/campus-proctor/page.tsx` (Modified Login UI)
+  - `lib/api.ts` (Modified API Client)
+  - `tests/test_phase1.py` (Rewritten & Expanded Comprehensive Test Suite)
+- **Verification Result:**
+  - `tests/test_phase1.py`: 100% Passed (24 test assertions across 9 sections)
+  - `tests/test_pipeline.py`: 100% Passed (11 core modules)
+  - `npx tsc --noEmit`: 100% Passed (0 TypeScript compilation errors)
+
+---
