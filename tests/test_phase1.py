@@ -1098,6 +1098,130 @@ for tbl in required_platform_tables:
 print("  [PASS] [Static SQL Inspection] Migration 004 defines all 7 required core platform tables.")
 
 
+
+# =====================================================================
+# SECTION 16: PHASE 1.3.5 DATABASE SECURITY & ARCHITECTURE REMEDIATION
+# =====================================================================
+print("\n--- SECTION 16: DATABASE SECURITY & ARCHITECTURE REMEDIATION [Phase 1.3.5] ---")
+
+print("[Test 16.1] [Static SQL Inspection] Direct anonymous INSERT revoked on campus_cases (Task 1)")
+mig_003_sql = (ROOT_DIR / "migrations" / "003_rate_limit_security_fix.sql").read_text(encoding="utf-8")
+assert "REVOKE INSERT ON public.campus_cases FROM PUBLIC;" in mig_003_sql, (
+    "Migration 003 must revoke INSERT on public.campus_cases from PUBLIC"
+)
+assert "REVOKE INSERT ON public.campus_cases FROM anon;" in mig_003_sql, (
+    "Migration 003 must revoke INSERT on public.campus_cases from anon"
+)
+assert "DROP POLICY IF EXISTS \"Allow student grievance submission\" ON public.campus_cases;" in mig_003_sql, (
+    "Migration 003 must drop legacy student grievance submission policy"
+)
+assert "DROP POLICY IF EXISTS \"Allow grievance intake submission\" ON public.campus_cases;" in mig_003_sql, (
+    "Migration 003 must drop legacy intake submission policy"
+)
+print("  [PASS] [Static SQL Inspection] Direct anonymous table INSERT strictly revoked on campus_cases.")
+
+print("[Test 16.2] [Static SQL Inspection] Audit log authenticity & immutability protection (Task 2)")
+mig_004_sql = (ROOT_DIR / "migrations" / "004_core_platform_schema.sql").read_text(encoding="utf-8")
+assert "REVOKE ALL PRIVILEGES ON public.case_activity_log FROM PUBLIC, anon, authenticated;" in mig_004_sql, (
+    "Migration 004 must revoke all privileges on case_activity_log before selective grants"
+)
+assert "GRANT SELECT ON public.case_activity_log TO authenticated;" in mig_004_sql, (
+    "authenticated users must have SELECT grant only on case_activity_log"
+)
+assert "GRANT SELECT, INSERT ON public.case_activity_log TO service_role;" in mig_004_sql, (
+    "service_role must have INSERT grant on case_activity_log"
+)
+assert "GRANT INSERT ON public.case_activity_log TO authenticated;" not in mig_004_sql, (
+    "authenticated users must NEVER be granted direct INSERT on case_activity_log (prevents log spoofing)"
+)
+assert "CREATE TRIGGER trg_immutable_case_activity_log" in mig_004_sql, (
+    "Immutability trigger must be attached to case_activity_log"
+)
+print("  [PASS] [Static SQL Inspection] Audit log prevents client spoofing: authenticated has SELECT only; backend-only INSERT.")
+
+print("[Test 16.3] [Static SQL Inspection] UUID Primary Key and Public case_id Separation (Task 3)")
+assert "id UUID PRIMARY KEY DEFAULT gen_random_uuid()," in mig_004_sql, (
+    "public.cases must use internal UUID primary key"
+)
+assert "case_id VARCHAR(64) UNIQUE NOT NULL," in mig_004_sql, (
+    "public.cases must have unique public case_id"
+)
+assert "case_uuid UUID NOT NULL REFERENCES public.cases(id)" in mig_004_sql, (
+    "public.case_documents must reference case_uuid UUID primary key"
+)
+print("  [PASS] [Static SQL Inspection] public.cases strictly separates internal UUID PK from public case_id.")
+
+print("[Test 16.4] [Unit] CaseManager creates internal UUID and public case_id")
+test_case_id = case_manager.create_case(life_liberty=False)
+stored_case = case_manager.get_case(test_case_id)
+assert stored_case is not None
+assert "internal_uuid" in stored_case, "Case data must contain internal_uuid"
+import uuid as _uuid_module
+_uuid_module.UUID(stored_case["internal_uuid"]) # Must be valid UUID
+assert stored_case["id"] == test_case_id
+print("  [PASS] [Unit] CaseManager assigns valid internal UUID and distinct public Case ID.")
+
+print("[Test 16.5] [Static SQL Inspection] Client Privilege Escalation Security (Task 6)")
+assert "CREATE TABLE IF NOT EXISTS public.profiles" in mig_004_sql, (
+    "Migration 004 must define public.profiles table"
+)
+assert "CREATE TRIGGER trg_profile_immutability" in mig_004_sql, (
+    "Migration 004 must attach trg_profile_immutability trigger to public.profiles"
+)
+assert "enforce_profile_immutability" in mig_004_sql, (
+    "Migration 004 must define enforce_profile_immutability function"
+)
+assert "users cannot modify their own assigned role" in mig_004_sql, (
+    "Trigger must specifically block client modification of role"
+)
+assert "GRANT SELECT ON public.institution_memberships TO authenticated;" in mig_004_sql, (
+    "institution_memberships must grant SELECT to authenticated"
+)
+assert "GRANT INSERT ON public.institution_memberships TO authenticated;" not in mig_004_sql, (
+    "authenticated must NOT have INSERT on institution_memberships"
+)
+assert "GRANT UPDATE ON public.institution_memberships TO authenticated;" not in mig_004_sql, (
+    "authenticated must NOT have UPDATE on institution_memberships"
+)
+print("  [PASS] [Static SQL Inspection] Client privilege escalation is blocked on profiles and institution_memberships.")
+
+print("[Test 16.6] [Static SQL Inspection] Private Schema Isolation & Legacy Public RPC Removal (Task 5)")
+assert "REVOKE ALL PRIVILEGES ON SCHEMA private FROM PUBLIC, anon;" in mig_004_sql, (
+    "private schema must revoke all privileges from PUBLIC and anon"
+)
+assert "DROP FUNCTION IF EXISTS public.verify_student_grievance_access" in mig_003_sql, (
+    "Legacy tracking RPC must be dropped"
+)
+assert "DROP FUNCTION IF EXISTS public.cleanup_stale_rate_limits" in mig_003_sql, (
+    "Legacy rate limit cleanup RPC must be dropped"
+)
+for func_name in ["is_platform_admin", "can_officer_access_case", "prevent_audit_log_modification", "enforce_profile_immutability"]:
+    assert f"private.{func_name}" in mig_004_sql, f"Missing private function {func_name} in 004"
+assert "SET search_path = ''" in mig_004_sql, "Functions in 004 must set empty search_path"
+print("  [PASS] [Static SQL Inspection] Private schema isolation verified; all legacy public RPCs dropped.")
+
+print("[Test 16.7] [Static SQL Inspection] Complete 12-Module Table Manifest Coverage (Task 4 & 8)")
+all_migrations_text = mig_003_sql + "\n" + mig_004_sql
+all_required_tables = [
+    "public.campus_cases",
+    "public.rate_limit_attempts",
+    "public.cases",
+    "public.platform_admins",
+    "public.profiles",
+    "public.institutions",
+    "public.institution_memberships",
+    "public.confidential_student_identities",
+    "public.case_documents",
+    "public.case_activity_log",
+    "public.legal_precedents",
+    "public.saved_research"
+]
+for tbl in all_required_tables:
+    assert tbl in all_migrations_text, f"Table {tbl} must be defined across migration manifest"
+print("  [PASS] [Static SQL Inspection] All 12 platform tables defined across the authoritative migration manifest.")
+
+
 print("\n" + "=" * 70)
 print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 TESTS COMPLETED SUCCESSFULLY!")
 print("=" * 70 + "\n")
+

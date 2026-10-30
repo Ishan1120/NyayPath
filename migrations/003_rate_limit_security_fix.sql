@@ -86,6 +86,21 @@ GRANT SELECT, INSERT, UPDATE, DELETE
 -- reach this table regardless of any RLS policy configuration.
 
 -- =====================================================================
+-- 4.1. REVOKE DIRECT ANONYMOUS INSERT ON public.campus_cases (Task 1)
+-- =====================================================================
+-- Direct anonymous table INSERT via PostgREST is unnecessary and dangerous:
+-- it bypasses FastAPI field validation, rate limiting, and server-side HMAC hashing.
+-- All grievance submissions are mediated exclusively by the FastAPI backend
+-- (POST /api/campus-proctor/submit) using the privileged service_role client.
+
+REVOKE INSERT ON public.campus_cases FROM PUBLIC;
+REVOKE INSERT ON public.campus_cases FROM anon;
+
+-- Drop permissive intake insertion policies
+DROP POLICY IF EXISTS "Allow student grievance submission" ON public.campus_cases;
+DROP POLICY IF EXISTS "Allow grievance intake submission" ON public.campus_cases;
+
+-- =====================================================================
 -- 5. MOVE cleanup_stale_rate_limits() TO NON-EXPOSED private SCHEMA
 -- =====================================================================
 -- The function in migration 002 was placed in the public schema and lacked

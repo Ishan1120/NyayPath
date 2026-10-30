@@ -1,6 +1,7 @@
 import os
 import random
 import string
+import uuid
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
@@ -54,6 +55,7 @@ class CaseManager:
 
     def create_case(self, life_liberty: bool = False, tracking_credential: Optional[str] = None) -> str:
         case_id = self._generate_case_id()
+        internal_uuid = str(uuid.uuid4())
         now_dt = datetime.now(timezone.utc)
         now_iso = now_dt.isoformat()
         
@@ -66,6 +68,7 @@ class CaseManager:
 
         initial_data = {
             "id": case_id,
+            "internal_uuid": internal_uuid,
             "status": "FILED",
             "filing_date": now_iso,
             "response_due_date": due_dt.isoformat(),
@@ -105,7 +108,15 @@ class CaseManager:
 
         if self.use_supabase:
             try:
-                self.supabase.table("cases").upsert({"id": case_id, "data": initial_data}).execute()
+                record = {
+                    "id": internal_uuid,
+                    "case_id": case_id,
+                    "data": initial_data,
+                    "tracking_key_hash": initial_data.get("tracking_key_hash"),
+                    "key_version": initial_data.get("key_version", "v1"),
+                    "case_type": "RTI"
+                }
+                self.supabase.table("cases").upsert(record, on_conflict="case_id").execute()
             except Exception as e:
                 logger.error(f"Supabase UPSERT Error on Create for case {case_id}: {e}")
                 raise RuntimeError(f"Failed to persist case to database: {e}") from e
@@ -153,9 +164,13 @@ class CaseManager:
 
         if self.use_supabase:
             try:
-                response = self.supabase.table("cases").select("data").eq("id", clean_id).execute()
+                response = self.supabase.table("cases").select("id, case_id, data").eq("case_id", clean_id).execute()
                 if response.data and len(response.data) > 0:
-                    return response.data[0]["data"]
+                    row = response.data[0]
+                    cdata = row.get("data", {})
+                    if isinstance(cdata, dict):
+                        cdata["internal_uuid"] = row.get("id")
+                    return cdata
                 return None  
             except Exception as e:
                 logger.error(f"Supabase SELECT Error for case {clean_id}: {e}")
@@ -171,15 +186,16 @@ class CaseManager:
 
         if self.use_supabase:
             try:
-                # Query all cases and filter in python to support heterogeneous schema data
-                response = self.supabase.table("cases").select("id, data").execute()
+                response = self.supabase.table("cases").select("id, case_id, data").execute()
                 if response.data:
                     for row in response.data:
                         case_data = row.get("data", {})
                         if isinstance(case_data, dict):
-                            case_id = row.get("id") or case_data.get("id")
-                            if case_id:
-                                case_data["id"] = case_id
+                            c_id = row.get("case_id") or row.get("id") or case_data.get("id")
+                            if c_id:
+                                case_data["id"] = c_id
+                            if row.get("id"):
+                                case_data["internal_uuid"] = row.get("id")
                             if case_data.get("status") != "CLOSED" and case_data.get("watchdog_enabled", True):
                                 active_cases.append(case_data)
             except Exception as e:
@@ -200,14 +216,26 @@ class CaseManager:
         current_data = self.get_case(clean_id)
         
         if current_data is None:
-            current_data = {"id": clean_id, "filing_date": datetime.now(timezone.utc).isoformat()}
+            current_data = {
+                "id": clean_id,
+                "internal_uuid": str(uuid.uuid4()),
+                "filing_date": datetime.now(timezone.utc).isoformat()
+            }
 
         current_data.update(updates)
         current_data["id"] = clean_id
 
         if self.use_supabase:
             try:
-                self.supabase.table("cases").upsert({"id": clean_id, "data": current_data}).execute()
+                record = {
+                    "case_id": clean_id,
+                    "data": current_data,
+                    "tracking_key_hash": current_data.get("tracking_key_hash"),
+                    "key_version": current_data.get("key_version", "v1")
+                }
+                if current_data.get("internal_uuid"):
+                    record["id"] = current_data["internal_uuid"]
+                self.supabase.table("cases").upsert(record, on_conflict="case_id").execute()
             except Exception as e:
                 logger.error(f"Supabase UPSERT Error on Update for case {clean_id}: {e}")
                 raise RuntimeError(f"Failed to update case in database: {e}") from e
