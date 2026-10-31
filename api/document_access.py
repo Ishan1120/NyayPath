@@ -13,6 +13,7 @@ Implements two distinct, strictly authorized document access pathways:
    - No direct anonymous storage access is ever exposed.
 """
 
+import os
 import hmac
 import hashlib
 import logging
@@ -30,6 +31,20 @@ CANONICAL_STORAGE_BUCKET = "case-documents"
 SIGNED_URL_EXPIRY_SECONDS = 300  # 5 minutes
 
 
+def is_production_environment() -> bool:
+    """
+    Returns True if the application is running in a production deployment environment.
+    In production, all persistence and signed URL generation must use live Supabase infrastructure;
+    in-memory and mock fallbacks are strictly prohibited.
+    """
+    return (
+        os.environ.get("ENVIRONMENT") == "production" or
+        os.environ.get("NODE_ENV") == "production" or
+        os.environ.get("ENV") == "production" or
+        os.environ.get("VERCEL") == "1"
+    )
+
+
 class DocumentAccessManager:
     def __init__(self, supabase_client=None):
         self._supabase = supabase_client
@@ -37,6 +52,8 @@ class DocumentAccessManager:
 
     @property
     def supabase(self):
+        if self._supabase is False:
+            return None
         if self._supabase is not None:
             return self._supabase
         try:
@@ -151,6 +168,16 @@ class DocumentAccessManager:
                     raise
                 except Exception as e:
                     logger.warning(f"Error verifying institution_memberships: {e}")
+                    if is_production_environment():
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Database unavailable: Unable to verify institutional membership in production."
+                        )
+            elif is_production_environment():
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Database unavailable: Persistent Supabase connection required in production."
+                )
 
             case_inst = (case.get("institution_id") or "").strip().upper()
             user_inst = (user.institution_id or "").strip().upper()
@@ -195,6 +222,16 @@ class DocumentAccessManager:
                             is_assigned_committee = True
                     except Exception as e:
                         logger.warning(f"Error checking case_committee_assignments: {e}")
+                        if is_production_environment():
+                            raise HTTPException(
+                                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                                detail="Database unavailable: Unable to verify committee assignment in production."
+                            )
+                elif is_production_environment():
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Database unavailable: Persistent Supabase connection required in production."
+                    )
                 else:
                     # In local simulation / offline unit testing where Supabase is not connected
                     is_assigned_committee = True
@@ -313,6 +350,18 @@ class DocumentAccessManager:
                     return res.data[0]
             except Exception as e:
                 logger.warning(f"Error fetching case from Supabase: {e}")
+                if is_production_environment():
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Database unavailable: Failed to query case from Supabase in production."
+                    )
+
+        if is_production_environment():
+            # In production, do not silently fall back to local test cache if Supabase is unconfigured or failed
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database unavailable: Persistent Supabase connection required in production."
+            )
 
         # Local test fallback
         from api.campus_proctor import campus_proctor_manager
@@ -322,25 +371,59 @@ class DocumentAccessManager:
         """
         Generates narrowly-scoped, short-lived signed URL (max 300s TTL) using backend credentials.
         Strictly enforces server-side maximum TTL cap of 300 seconds (SIGNED_URL_EXPIRY_SECONDS).
+        In production, strictly fails closed on missing connection, Storage API failure, or missing object.
         """
         doc_path = f"{case_id}/{document_id}"
         signed_url = None
         effective_ttl = min(ttl, SIGNED_URL_EXPIRY_SECONDS) if (ttl is not None and ttl > 0) else SIGNED_URL_EXPIRY_SECONDS
+
+        if not self.supabase and is_production_environment():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Storage service unavailable: Persistent Supabase Storage connection required. Mock storage is strictly disabled in production."
+            )
 
         if self.supabase:
             try:
                 res = self.supabase.storage.from_(CANONICAL_STORAGE_BUCKET).create_signed_url(
                     doc_path, effective_ttl
                 )
-                if isinstance(res, dict) and "signedURL" in res:
-                    signed_url = res["signedURL"]
-                elif isinstance(res, str):
+                if isinstance(res, dict):
+                    if "signedURL" in res and res["signedURL"]:
+                        signed_url = res["signedURL"]
+                    elif "error" in res or "statusCode" in res:
+                        error_msg = res.get("message") or res.get("error") or "Unknown storage error"
+                        status_code = res.get("statusCode")
+                        logger.error(f"Supabase storage returned error for '{doc_path}': {res}")
+                        if is_production_environment():
+                            if status_code in (404, "404") or "not_found" in str(res).lower():
+                                raise HTTPException(
+                                    status_code=status.HTTP_404_NOT_FOUND,
+                                    detail=f"Document '{document_id}' not found in storage."
+                                )
+                            raise HTTPException(
+                                status_code=status.HTTP_502_BAD_GATEWAY,
+                                detail=f"Storage service error: Unable to generate signed URL ({error_msg})."
+                            )
+                elif isinstance(res, str) and res.strip():
                     signed_url = res
+            except HTTPException:
+                raise
             except Exception as e:
                 logger.error(f"Failed to generate Supabase signed URL: {e}")
+                if is_production_environment():
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail="Storage service error: Failed to communicate with storage service."
+                    )
 
         if not signed_url:
-            # Mock signed URL for local development/testing
+            if is_production_environment():
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Storage unavailable: Signed URL could not be generated. Mock storage is strictly disabled in production."
+                )
+            # Mock signed URL ONLY for explicit local development/testing
             signed_url = f"https://mock-storage.nyaypath.internal/{CANONICAL_STORAGE_BUCKET}/{doc_path}?token=mock_signed_ttl{effective_ttl}"
 
         return {
