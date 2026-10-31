@@ -29,7 +29,8 @@ class RateLimiter:
         # service_role secret key.
         # SUPABASE_SECRET_KEY: service_role key — never sent to the browser.
         secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
-        self.use_supabase = bool(url and secret_key and create_client)
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        self.use_supabase = bool(url and secret_key and create_client and not is_offline_test)
         self.supabase: Optional[Client] = None
         self._local_db_path = os.environ.get("CAMPUS_SQLITE_DB", "campus_cases_persistent.db")
 

@@ -36,7 +36,8 @@ class CaseManager:
         # SUPABASE_SECRET_KEY: service_role key -- never sent to the browser.
         secret_key: str = os.environ.get("SUPABASE_SECRET_KEY", "")
 
-        self.use_supabase = bool(url and secret_key and create_client)
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        self.use_supabase = bool(url and secret_key and create_client and not is_offline_test)
         self._memory_cases: Dict[str, Dict[str, Any]] = {}
 
         if self.use_supabase:

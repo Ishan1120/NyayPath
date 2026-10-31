@@ -16,10 +16,11 @@ Implements two distinct, strictly authorized document access pathways:
 import hmac
 import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status
 
-from api.auth import AuthUser, UserRole, decode_access_token
+from api.auth import AuthUser, UserRole, AccountStatus, decode_access_token
 from api.campus_proctor import hash_verification_key
 from api.rate_limiter import rate_limiter
 
@@ -89,9 +90,24 @@ class DocumentAccessManager:
         user: AuthUser
     ) -> Dict[str, Any]:
         """
-        Pathway 1: Validates authenticated user role, institutional boundary, and ownership.
+        Pathway 1: Validates authenticated user role, account status, institutional boundary,
+        confidentiality restrictions, and case ownership.
         """
-        # Platform Admin has emergency global oversight
+        # 1. Enforce active account status (disabled/revoked/suspended accounts rejected)
+        if getattr(user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Access denied: User account is inactive, suspended, or revoked."
+            )
+
+        # 2. Enforce session expiration
+        if user.exp and user.exp < int(datetime.now(timezone.utc).timestamp()):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Access denied: Authentication session has expired."
+            )
+
+        # 3. Platform Admin has emergency global oversight
         if user.role == UserRole.PLATFORM_ADMIN:
             return self._create_signed_url(case_id, document_id, access_type="PLATFORM_ADMIN")
 
@@ -99,11 +115,25 @@ class DocumentAccessManager:
         if not case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
 
-        # Verify document belongs to case
+        # 4. Verify document belongs to case
         self._verify_document_belongs_to_case(case, document_id)
 
-        # Institutional Officers (Proctors, Committee Members, Institution Admins)
+        # 5. Institutional Officers (Proctors, Committee Members, Institution Admins)
         if user.role in [UserRole.PROCTOR, UserRole.CHIEF_PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN]:
+            # Enforce live database membership check if Supabase is connected
+            if self.supabase:
+                try:
+                    res = self.supabase.table("institution_memberships").select("id, account_status").eq("user_id", user.user_id).eq("account_status", "active").execute()
+                    if not res.data:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Access denied: Officer institutional membership is revoked or inactive."
+                        )
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    logger.warning(f"Error verifying institution_memberships: {e}")
+
             case_inst = (case.get("institution_id") or "").strip().upper()
             user_inst = (user.institution_id or "").strip().upper()
             if case_inst != user_inst:
@@ -112,6 +142,12 @@ class DocumentAccessManager:
                     detail="Cross-institution document access forbidden: Case belongs to a different institution."
                 )
 
+            # Check if grievance or document is marked confidential
+            is_confidential = (
+                case.get("confidentiality_mode") in ["CONFIDENTIAL", "STRICT_CONFIDENTIAL"] or
+                case.get("is_confidential") is True
+            )
+
             # Check if assigned or general institutional authority
             assigned_proctor = case.get("assigned_proctor")
             if assigned_proctor and (assigned_proctor == user.name or assigned_proctor == user.user_id):
@@ -119,9 +155,17 @@ class DocumentAccessManager:
             elif user.role in [UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN]:
                 return self._create_signed_url(case_id, document_id, access_type="COMMITTEE_MEMBER")
             else:
+                # Unassigned proctor in same institution:
+                # Permitted for standard/public cases (institutional intake triage);
+                # Strictly DENIED for confidential grievances without explicit case assignment
+                if is_confidential:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: Confidential grievance documents require direct case assignment or committee membership."
+                    )
                 return self._create_signed_url(case_id, document_id, access_type="UNASSIGNED_INSTITUTION_PROCTOR")
 
-        # Citizen / Student Owner
+        # 6. Citizen / Student Owner
         if case.get("student_user_id") != user.user_id and case.get("user_id") != user.user_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

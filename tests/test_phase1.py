@@ -33,6 +33,7 @@ if str(ROOT_DIR) not in sys.path:
 # Ensure local test mode allows SQLite for offline testing
 os.environ["ALLOW_LOCAL_SQLITE"] = "1"
 os.environ["TEST_MODE"] = "1"
+os.environ["SUPABASE_OFFLINE_TEST"] = "1"
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -1695,6 +1696,95 @@ except HTTPException as e:
     assert e.status_code in (403, 404)
 print("  [PASS] Documents belonging to different cases or unassociated with case strictly rejected.")
 
+print("[Test 19.8] Suspended/revoked officer account is rejected from document access (401)")
+revoked_token = create_access_token(AuthUser(
+    user_id=str(uuid.uuid4()),
+    email="revoked@nit.edu",
+    role=UserRole.PROCTOR,
+    institution_id="NIT_DURGAPUR",
+    account_status=AccountStatus.REVOKED
+))
+try:
+    doc_mgr.generate_document_signed_url(
+        case_id=mock_case_id,
+        document_id="doc_case77_01.pdf",
+        auth_header=f"Bearer {revoked_token}"
+    )
+    assert False, "Revoked account should have been rejected"
+except HTTPException as e:
+    assert e.status_code == 401
+    assert "invalid" in e.detail.lower() or "revoked" in e.detail.lower() or "expired" in e.detail.lower()
+print("  [PASS] Revoked officer account strictly rejected with 401 Unauthorized.")
+
+print("[Test 19.9] Expired session token is rejected from document access (401)")
+from datetime import timedelta
+expired_token = create_access_token(
+    AuthUser(
+        user_id=str(uuid.uuid4()),
+        email="expired@nit.edu",
+        role=UserRole.PROCTOR,
+        institution_id="NIT_DURGAPUR"
+    ),
+    expires_delta=timedelta(seconds=-10)
+)
+try:
+    doc_mgr.generate_document_signed_url(
+        case_id=mock_case_id,
+        document_id="doc_case77_01.pdf",
+        auth_header=f"Bearer {expired_token}"
+    )
+    assert False, "Expired token should have been rejected"
+except HTTPException as e:
+    assert e.status_code == 401
+print("  [PASS] Expired access token strictly rejected with 401 Unauthorized.")
+
+print("[Test 19.10] Confidential grievance document access: unassigned proctor DENIED (403), committee ALLOWED")
+confidential_case_id = "CAMPUS-CONFIDENTIAL-88"
+campus_proctor_manager._local_case_cache[confidential_case_id] = {
+    "id": str(uuid.uuid4()),
+    "case_id": confidential_case_id,
+    "case_type": "CAMPUS_GRIEVANCE",
+    "institution_id": "NIT_DURGAPUR",
+    "student_user_id": mock_student_id,
+    "assigned_proctor": "Dr. Assigned Proctor",
+    "confidentiality_mode": "CONFIDENTIAL",
+    "supporting_documents": ["confidential_evidence.pdf"],
+    "status": "UNDER_INQUIRY"
+}
+# Unassigned proctor attempt on confidential grievance
+try:
+    doc_mgr.generate_document_signed_url(
+        case_id=confidential_case_id,
+        document_id="confidential_evidence.pdf",
+        auth_header=f"Bearer {unassigned_proctor_token}"
+    )
+    assert False, "Unassigned proctor should be denied access to confidential case documents"
+except HTTPException as e:
+    assert e.status_code == 403
+    assert "Confidential grievance documents require direct case assignment" in e.detail
+
+# Committee member attempt on confidential grievance (ALLOWED)
+committee_token = create_access_token(AuthUser(
+    user_id=str(uuid.uuid4()),
+    email="committee@nit.edu",
+    role=UserRole.COMMITTEE_MEMBER,
+    institution_id="NIT_DURGAPUR",
+    name="Prof. Committee"
+))
+res_committee = doc_mgr.generate_document_signed_url(
+    case_id=confidential_case_id,
+    document_id="confidential_evidence.pdf",
+    auth_header=f"Bearer {committee_token}"
+)
+assert res_committee["access_type"] == "COMMITTEE_MEMBER"
+print("  [PASS] Confidential grievance documents restrict unassigned proctors (403) and grant committee members.")
+
+print("[Test 19.11] Signed URL TTL and single-object scoping verification")
+assert res_committee["expires_in_seconds"] == 300, "Signed URL must enforce 300-second TTL"
+assert res_committee["bucket"] == "case-documents", "Bucket must be canonical 'case-documents'"
+assert "confidential_evidence.pdf" in res_committee["signed_url"]
+print("  [PASS] Signed URL enforced with single-object scope and 300s TTL.")
+
 # =====================================================================
 # SECTION 20: CROSS-CASE-TYPE ISOLATION & ATOMIC RPC CONCURRENCY (TASK 1 & TASK 4)
 # =====================================================================
@@ -1895,6 +1985,37 @@ try:
 except ValueError as e:
     assert "Encrypted or password-protected" in str(e)
 print("  [PASS] Encrypted/password-protected PDF rejected with clear error.")
+
+print("[Test 22.4] Sanitize PDF page annotations (strip reviewer author names)")
+annot_writer = pypdf.PdfWriter()
+annot_writer.add_blank_page(width=100, height=100)
+sample_annot = pypdf.generic.DictionaryObject({
+    pypdf.generic.NameObject("/Type"): pypdf.generic.NameObject("/Annot"),
+    pypdf.generic.NameObject("/Subtype"): pypdf.generic.NameObject("/Text"),
+    pypdf.generic.NameObject("/T"): pypdf.generic.create_string_object("Secret Reviewer Rohit"),
+    pypdf.generic.NameObject("/Contents"): pypdf.generic.create_string_object("Disciplinary review comment")
+})
+annot_writer.add_annotation(0, sample_annot)
+annot_buf = io.BytesIO()
+annot_writer.write(annot_buf)
+
+sanitized_annot_bytes = sanitize_pdf_metadata(annot_buf.getvalue())
+sanitized_annot_reader = pypdf.PdfReader(io.BytesIO(sanitized_annot_bytes))
+sanitized_t = sanitized_annot_reader.pages[0]["/Annots"][0].get_object()["/T"]
+assert sanitized_t == "Confidential Reviewer", f"Annotation author must be sanitized, got {sanitized_t}"
+print("  [PASS] PDF page annotation author metadata successfully anonymized.")
+
+print("[Test 22.5] Strip hidden embedded attachments from PDF")
+attach_writer = pypdf.PdfWriter()
+attach_writer.add_blank_page(width=100, height=100)
+attach_writer.add_attachment("confidential_payload.csv", b"col1,col2\nsecret,data")
+attach_buf = io.BytesIO()
+attach_writer.write(attach_buf)
+
+sanitized_attach_bytes = sanitize_pdf_metadata(attach_buf.getvalue())
+sanitized_attach_reader = pypdf.PdfReader(io.BytesIO(sanitized_attach_bytes))
+assert len(sanitized_attach_reader.attachments) == 0, "All embedded file attachments must be stripped"
+print("  [PASS] Hidden embedded file attachments stripped completely from PDF.")
 
 print("\n" + "=" * 70)
 print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 + 1.3.7 TESTS COMPLETED SUCCESSFULLY!")

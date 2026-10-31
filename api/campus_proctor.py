@@ -134,7 +134,8 @@ class CampusProctorManager:
         # SUPABASE_SECRET_KEY: service_role key — never sent to the browser.
         secret_key: str = os.environ.get("SUPABASE_SECRET_KEY", "")
 
-        self.use_supabase = bool(url and secret_key and create_client)
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        self.use_supabase = bool(url and secret_key and create_client and not is_offline_test)
         self.supabase: Optional[Client] = None
         self._local_db_path = os.environ.get("CAMPUS_SQLITE_DB", "campus_cases_persistent.db")
         self._local_case_cache: Dict[str, Any] = {}
@@ -404,12 +405,43 @@ class CampusProctorManager:
     # Proctor Dashboard: Fetch Single Case with Institutional Boundary
     # -----------------------------------------------------------------
     def get_case_for_proctor(self, case_id: str, proctor_user: AuthUser) -> Dict[str, Any]:
+        if not proctor_user or getattr(proctor_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive, suspended, or revoked."
+            )
+
         clean_id = (case_id or "").strip().upper()
         case = self._fetch_raw_case(clean_id)
         if not case:
             raise HTTPException(status_code=404, detail="Campus grievance case not found.")
 
         verify_institutional_boundary(proctor_user, case.get("institution_id", "INST_DEFAULT"))
+
+        # Verify active institutional membership in Supabase mode
+        if self.use_supabase and self.supabase and proctor_user.role != UserRole.PLATFORM_ADMIN:
+            try:
+                res = self.supabase.table("institution_memberships").select("id, account_status, role").eq("user_id", proctor_user.user_id).eq("account_status", "active").execute()
+                if not res.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Forbidden: User lacks an active institutional membership in institution_memberships."
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.warning(f"institution_memberships lookup exception: {e}")
+
+        # Confidential grievances: unassigned proctors restricted unless committee or admin
+        is_confidential = case.get("confidentiality_mode") in ["CONFIDENTIAL", "STRICT_CONFIDENTIAL"]
+        if is_confidential and proctor_user.role == UserRole.PROCTOR:
+            assigned = case.get("assigned_proctor")
+            if assigned and assigned != proctor_user.name and assigned != proctor_user.user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Confidential grievances require direct case assignment or committee membership."
+                )
+
         sanitized = dict(case)
         sanitized.pop("verification_key_hash", None)
         return sanitized
@@ -419,6 +451,26 @@ class CampusProctorManager:
     # -----------------------------------------------------------------
     def list_cases_for_proctor(self, proctor_user: AuthUser) -> List[Dict[str, Any]]:
         self._ensure_connected()
+        if not proctor_user or getattr(proctor_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive, suspended, or revoked."
+            )
+
+        # In Supabase mode, verify active membership in institution_memberships
+        if self.use_supabase and self.supabase and proctor_user.role != UserRole.PLATFORM_ADMIN:
+            try:
+                res = self.supabase.table("institution_memberships").select("id, account_status, role").eq("user_id", proctor_user.user_id).eq("account_status", "active").execute()
+                if not res.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Forbidden: User lacks an active institutional membership in institution_memberships."
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.warning(f"institution_memberships lookup exception: {e}")
+
         cases: List[Dict[str, Any]] = []
 
         if self.use_supabase and self.supabase:

@@ -88,6 +88,19 @@ def sanitize_pdf_metadata(pdf_bytes: bytes) -> bytes:
 
             out_writer = pypdf.PdfWriter()
             for page in reader.pages:
+                # Sanitize page-level annotations (strip author/title metadata from notes)
+                if "/Annots" in page:
+                    try:
+                        annots = page["/Annots"]
+                        for annot_ref in annots:
+                            annot_obj = annot_ref.get_object() if hasattr(annot_ref, "get_object") else annot_ref
+                            if isinstance(annot_obj, dict):
+                                if "/T" in annot_obj:
+                                    annot_obj[pypdf.generic.NameObject("/T")] = pypdf.generic.create_string_object("Confidential Reviewer")
+                                if "/RC" in annot_obj:
+                                    annot_obj.pop(pypdf.generic.NameObject("/RC"), None)
+                    except Exception:
+                        pass
                 out_writer.add_page(page)
 
             # Completely strip metadata dictionary
