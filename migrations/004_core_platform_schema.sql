@@ -169,9 +169,9 @@ END $$;
 -- 1. Same case_id with different UUID: REJECT via RAISE EXCEPTION.
 -- 2. Same UUID with different case_id: REJECT via RAISE EXCEPTION.
 -- 3. Mismatched case_type: REJECT via RAISE EXCEPTION.
--- 4. Pre-created or retry parent: Inherit authoritative parent status/credentials; DO NOT overwrite parent.
+-- 4. Pre-created or retry parent: Inherit authoritative parent status/credentials/timestamps; DO NOT overwrite parent.
 -- 5. Child update attempts to alter id or case_id: REJECT via RAISE EXCEPTION.
--- 6. Child update attempts to independently modify status or credentials: REJECT via RAISE EXCEPTION.
+-- 6. Child update attempts to independently modify any parent-owned field (status, tracking key, timestamps): REJECT via RAISE EXCEPTION.
 CREATE OR REPLACE FUNCTION private.sync_campus_case_parent()
 RETURNS TRIGGER AS $$
 DECLARE
@@ -184,7 +184,7 @@ BEGIN
 
     IF TG_OP = 'INSERT' THEN
         -- Check if parent row already exists by id OR case_id
-        SELECT id, case_id, case_type, status, tracking_key_hash, key_version INTO v_existing_parent
+        SELECT id, case_id, case_type, status, tracking_key_hash, key_version, created_at, updated_at INTO v_existing_parent
         FROM public.cases
         WHERE id = NEW.id OR case_id = NEW.case_id
         LIMIT 1;
@@ -209,10 +209,12 @@ BEGIN
             END IF;
 
             -- Collision Check 4: Existing parent matches UUID, case_id, and case_type (Idempotent intake / retry)
-            -- Strictly inherit authoritative parent values without overwriting with stale child data
+            -- Strictly inherit authoritative parent values including timestamps without overwriting with stale child data
             NEW.status := v_existing_parent.status;
             NEW.verification_key_hash := v_existing_parent.tracking_key_hash;
             NEW.key_version := v_existing_parent.key_version;
+            NEW.created_at := v_existing_parent.created_at;
+            NEW.updated_at := v_existing_parent.updated_at;
 
             RETURN NEW;
         ELSE
@@ -252,15 +254,23 @@ BEGIN
                 OLD.case_id, NEW.case_id;
         END IF;
 
-        -- Check 6: Enforce one-way authority. Child cannot independently modify parent-owned fields.
-        -- When pg_trigger_depth() = 1, this is an update targeting campus_cases directly.
+        -- Check 6: Enforce one-way authority. Child cannot independently modify ANY parent-owned field.
+        -- When pg_trigger_depth() = 1, this is a direct child update bypassing public.cases.
         IF NEW.status IS DISTINCT FROM OLD.status THEN
-            RAISE EXCEPTION 'Parent authority violation: Status is authoritatively owned by public.cases and cannot be modified via child campus_cases table. Update public.cases instead.';
+            RAISE EXCEPTION 'Parent authority violation: status is authoritatively owned by public.cases and cannot be modified via child campus_cases table. Update public.cases instead.';
         END IF;
 
         IF NEW.verification_key_hash IS DISTINCT FROM OLD.verification_key_hash OR
            NEW.key_version IS DISTINCT FROM OLD.key_version THEN
             RAISE EXCEPTION 'Parent authority violation: Tracking credentials are authoritatively owned by public.cases and cannot be modified via child campus_cases table.';
+        END IF;
+
+        IF NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+            RAISE EXCEPTION 'Parent authority violation: created_at is authoritatively owned by public.cases and is strictly immutable.';
+        END IF;
+
+        IF NEW.updated_at IS DISTINCT FROM OLD.updated_at THEN
+            RAISE EXCEPTION 'Parent authority violation: updated_at is authoritatively owned by public.cases and is synchronized via parent updates.';
         END IF;
 
         RETURN NEW;
@@ -310,7 +320,86 @@ CREATE TRIGGER trg_sync_parent_case_update
     FOR EACH ROW EXECUTE FUNCTION private.sync_parent_case_to_campus();
 
 -- =====================================================================
--- 4. PUBLIC.PLATFORM_ADMINS (Database-Backed Admin Registry)
+-- 4. ATOMIC GRIEVANCE STATUS UPDATE RPC (Task 2)
+-- =====================================================================
+-- Executes parent and child status updates inside a single atomic database transaction.
+-- Strictly restricted: EXECUTE granted ONLY to service_role; REVOKED from PUBLIC, anon, authenticated.
+-- Runtime defense-in-depth: Checks auth.role() = 'service_role'.
+
+CREATE OR REPLACE FUNCTION public.update_campus_grievance_status(
+    p_case_id VARCHAR(64),
+    p_new_status VARCHAR(64),
+    p_proctor_notes TEXT DEFAULT NULL,
+    p_hearing_date TEXT DEFAULT NULL,
+    p_action_taken TEXT DEFAULT NULL,
+    p_resolution_details TEXT DEFAULT NULL,
+    p_assigned_proctor TEXT DEFAULT NULL,
+    p_assigned_committee TEXT DEFAULT NULL,
+    p_history JSONB DEFAULT '[]'::jsonb
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_case_uuid UUID;
+    v_updated_at TIMESTAMPTZ := timezone('utc'::text, now());
+    v_result JSONB;
+BEGIN
+    -- Runtime defense-in-depth check: reject any non-service_role caller
+    IF current_setting('request.jwt.claim.role', true) <> 'service_role' AND auth.role() <> 'service_role' THEN
+        RAISE EXCEPTION 'Access denied: update_campus_grievance_status is restricted to backend service_role only.';
+    END IF;
+
+    -- 1. Locate authoritative parent case
+    SELECT id INTO v_case_uuid
+    FROM public.cases
+    WHERE case_id = p_case_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Case % not found', p_case_id;
+    END IF;
+
+    -- 2. Update authoritative parent in public.cases
+    -- Triggers trg_sync_parent_case_update to synchronize status and updated_at to campus_cases
+    UPDATE public.cases
+    SET
+        status = p_new_status,
+        updated_at = v_updated_at
+    WHERE id = v_case_uuid;
+
+    -- 3. Update campus-specific fields in public.campus_cases atomically
+    UPDATE public.campus_cases
+    SET
+        proctor_notes = COALESCE(p_proctor_notes, proctor_notes),
+        hearing_date = COALESCE(p_hearing_date, hearing_date),
+        action_taken = COALESCE(p_action_taken, action_taken),
+        resolution_details = COALESCE(p_resolution_details, resolution_details),
+        assigned_proctor = COALESCE(p_assigned_proctor, assigned_proctor),
+        assigned_committee = COALESCE(p_assigned_committee, assigned_committee),
+        history = p_history
+    WHERE id = v_case_uuid;
+
+    -- 4. Retrieve and return the updated sanitized record
+    SELECT to_jsonb(cc) INTO v_result
+    FROM public.campus_cases cc
+    WHERE cc.id = v_case_uuid;
+
+    RETURN v_result;
+END;
+$$;
+
+REVOKE ALL PRIVILEGES ON FUNCTION public.update_campus_grievance_status(
+    VARCHAR(64), VARCHAR(64), TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
+) FROM PUBLIC, anon, authenticated;
+
+GRANT EXECUTE ON FUNCTION public.update_campus_grievance_status(
+    VARCHAR(64), VARCHAR(64), TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
+) TO service_role;
+
+-- =====================================================================
+-- 5. PUBLIC.PLATFORM_ADMINS (Database-Backed Admin Registry)
 -- =====================================================================
 -- Consumer: private.is_platform_admin(), api/auth.py
 
@@ -560,21 +649,25 @@ REVOKE ALL PRIVILEGES ON public.audit_actor_mappings FROM PUBLIC, anon, authenti
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.audit_actor_mappings TO service_role;
 
 -- =====================================================================
--- 12. PUBLIC.CASE_ACTIVITY_LOG (Immutable Audit Trail)
+-- 13. PUBLIC.CASE_ACTIVITY_LOG (Append-Only Audit Trail)
 -- =====================================================================
--- Task 2: References stable pseudonymous audit_actor_id (not auth.users directly).
--- Approved erasure severs identity in public.audit_actor_mappings without touching immutable log rows.
+-- Task 3: References stable pseudonymous audit_actor_id (not auth.users directly).
+-- audit_actor_id is NULL for SYSTEM and ANONYMOUS events; actor_type distinguishes provenance.
+-- ip_address INET is strictly excluded; ICT perimeter logs are stored separately.
 -- action_details strictly contains operational telemetry (NEVER personal PII or raw credentials).
+-- Append-only under application permissions; guarded against client/officer modifications.
 
 CREATE TABLE IF NOT EXISTS public.case_activity_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     case_uuid UUID NOT NULL REFERENCES public.cases(id) ON DELETE RESTRICT,
     case_id VARCHAR(64) NOT NULL,
-    audit_actor_id UUID,
+    audit_actor_id UUID, -- Nullable for SYSTEM and ANONYMOUS actions
+    actor_type VARCHAR(16) NOT NULL DEFAULT 'USER' CHECK (
+        actor_type IN ('USER', 'SYSTEM', 'ANONYMOUS')
+    ),
     actor_role VARCHAR(32) NOT NULL,
     action_type VARCHAR(64) NOT NULL,
     action_details JSONB NOT NULL DEFAULT '{}'::jsonb,
-    ip_address INET,
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 

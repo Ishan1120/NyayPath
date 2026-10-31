@@ -438,19 +438,24 @@ class CampusProctorManager:
 
         if self.use_supabase and self.supabase:
             try:
-                # 1. Update authoritative parent status in public.cases (Task 1)
-                self.supabase.table("cases").update({
-                    "status": payload.new_status,
-                    "updated_at": now_iso
-                }).eq("case_id", clean_id).execute()
-
-                # 2. Update campus-specific fields in public.campus_cases (parent trigger syncs status)
-                res = self.supabase.table("campus_cases").update(campus_updates).eq("case_id", clean_id).execute()
+                # Task 2: Single atomic database transaction via restricted service_role RPC
+                rpc_payload = {
+                    "p_case_id": clean_id,
+                    "p_new_status": payload.new_status,
+                    "p_proctor_notes": payload.proctor_notes,
+                    "p_hearing_date": payload.hearing_date,
+                    "p_action_taken": payload.action_taken,
+                    "p_resolution_details": payload.resolution_details,
+                    "p_assigned_proctor": payload.assigned_proctor,
+                    "p_assigned_committee": payload.assigned_committee,
+                    "p_history": history
+                }
+                res = self.supabase.rpc("update_campus_grievance_status", rpc_payload).execute()
                 if not res.data:
-                    raise RuntimeError("Supabase update returned empty.")
-                case = res.data[0]
+                    raise RuntimeError("Atomic grievance update returned empty response.")
+                case = res.data
             except Exception as e:
-                logger.error(f"Supabase UPDATE Error in campus_proctor: {e}")
+                logger.error(f"Atomic UPDATE Error in campus_proctor: {e}")
                 raise HTTPException(status_code=500, detail="Database update failed.")
         else:
             case["status"] = payload.new_status
