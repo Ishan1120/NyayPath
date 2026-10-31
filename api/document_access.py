@@ -181,7 +181,7 @@ class DocumentAccessManager:
 
             # Check if user is actively assigned to committee inquiry for this case
             is_assigned_committee = False
-            if user.role == UserRole.COMMITTEE_MEMBER:
+            if user.role in [UserRole.COMMITTEE_MEMBER, UserRole.CHIEF_PROCTOR]:
                 if self.supabase and case.get("id"):
                     try:
                         res_comm = self.supabase.table("case_committee_assignments").select("id").eq(
@@ -204,7 +204,7 @@ class DocumentAccessManager:
             elif user.role == UserRole.INSTITUTION_ADMIN:
                 return self._create_signed_url(case_id, document_id, access_type="INSTITUTION_ADMIN", ttl=ttl)
             elif is_assigned_committee:
-                return self._create_signed_url(case_id, document_id, access_type="COMMITTEE_MEMBER", ttl=ttl)
+                return self._create_signed_url(case_id, document_id, access_type="COMMITTEE_MEMBER" if user.role == UserRole.COMMITTEE_MEMBER else "ASSIGNED_CHIEF_PROCTOR", ttl=ttl)
             else:
                 # Unassigned proctor or unassigned committee member in same institution:
                 # Permitted only for standard non-confidential cases (institutional intake triage);

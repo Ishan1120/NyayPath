@@ -443,11 +443,30 @@ class CampusProctorManager:
             except Exception as e:
                 logger.warning(f"institution_memberships lookup exception: {e}")
 
-        # Confidential grievances: unassigned proctors restricted unless committee or admin
+        # Confidential grievances: unassigned officers restricted unless committee assignment, direct proctor assignment, or admin oversight
         is_confidential = case.get("confidentiality_mode") in ["CONFIDENTIAL", "STRICT_CONFIDENTIAL"]
-        if is_confidential and proctor_user.role == UserRole.PROCTOR:
+        if is_confidential and proctor_user.role not in [UserRole.PLATFORM_ADMIN, UserRole.INSTITUTION_ADMIN]:
+            assigned_uuid = case.get("assigned_proctor_user_id")
             assigned = case.get("assigned_proctor")
-            if assigned and assigned != proctor_user.name and assigned != proctor_user.user_id:
+            is_assigned_proctor = bool(
+                (assigned_uuid and str(assigned_uuid).lower() == str(proctor_user.user_id).lower()) or
+                (not assigned_uuid and assigned and (str(assigned).lower() == str(proctor_user.user_id).lower() or assigned == proctor_user.name))
+            )
+            is_assigned_comm = False
+            if proctor_user.role in [UserRole.COMMITTEE_MEMBER, UserRole.CHIEF_PROCTOR]:
+                if self.supabase and case.get("id"):
+                    try:
+                        res_c = self.supabase.table("case_committee_assignments").select("id").eq(
+                            "case_uuid", case["id"]
+                        ).eq("user_id", proctor_user.user_id).eq("assignment_status", "active").execute()
+                        if res_c.data and len(res_c.data) > 0:
+                            is_assigned_comm = True
+                    except Exception as e:
+                        logger.warning(f"Error checking case_committee_assignments in get_case_for_proctor: {e}")
+                elif not self.use_supabase:
+                    is_assigned_comm = getattr(proctor_user, "_mock_assigned_comm", False)
+
+            if not is_assigned_proctor and not is_assigned_comm:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Access denied: Confidential grievances require direct case assignment or committee membership."

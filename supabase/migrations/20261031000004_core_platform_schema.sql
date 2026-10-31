@@ -525,6 +525,22 @@ $$;
 REVOKE ALL PRIVILEGES ON FUNCTION private.is_platform_admin() FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION private.is_platform_admin() TO authenticated, service_role;
 
+CREATE OR REPLACE FUNCTION private.is_platform_admin(p_user_id UUID)
+RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = ''
+AS $$
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.platform_admins pa
+    WHERE pa.user_id = COALESCE(p_user_id, auth.uid())
+      AND pa.account_status = 'active'
+  );
+$$;
+
+REVOKE ALL PRIVILEGES ON FUNCTION private.is_platform_admin(UUID) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION private.is_platform_admin(UUID) TO authenticated, service_role;
+
 -- =====================================================================
 -- 6. PUBLIC.PROFILES (User Identity & Role Registry)
 -- =====================================================================
@@ -750,7 +766,16 @@ DECLARE
     v_assignment_id UUID;
     v_res JSONB;
 BEGIN
+    -- Runtime defense-in-depth check: fail-closed service_role authorization
+    IF COALESCE(current_setting('request.jwt.claim.role', true), '') <> 'service_role'
+       AND COALESCE(auth.role(), '') <> 'service_role' THEN
+        RAISE EXCEPTION 'Access denied: assign_case_committee_member is restricted to backend service_role only.';
+    END IF;
+
     v_assigner_uuid := COALESCE(p_assigned_by, auth.uid());
+    IF v_assigner_uuid IS NULL THEN
+        RAISE EXCEPTION 'Assigner identity required';
+    END IF;
 
     -- 1. Locate case and lock row
     SELECT c.id, c.case_type, cc.institution_uuid, cc.institution_id
@@ -769,21 +794,19 @@ BEGIN
     END IF;
 
     -- 2. Verify assigner authorization
-    IF v_assigner_uuid IS NOT NULL THEN
-        IF NOT private.is_platform_admin() THEN
-            IF NOT EXISTS (
-                SELECT 1 FROM public.institution_memberships im
-                WHERE im.user_id = v_assigner_uuid
-                  AND (
-                      (v_inst_uuid IS NOT NULL AND im.institution_id = v_inst_uuid)
-                      OR (v_inst_uuid IS NULL AND im.institution_code = v_inst_code)
-                  )
-                  AND im.role IN ('institution_admin', 'chief_proctor')
-                  AND im.account_status = 'active'
-            ) THEN
-                RAISE EXCEPTION 'User % is not authorized to provision committee assignments for institution %',
-                    v_assigner_uuid, COALESCE(v_inst_code, v_inst_uuid::text);
-            END IF;
+    IF NOT private.is_platform_admin(v_assigner_uuid) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.institution_memberships im
+            WHERE im.user_id = v_assigner_uuid
+              AND (
+                  (v_inst_uuid IS NOT NULL AND im.institution_id = v_inst_uuid)
+                  OR (v_inst_uuid IS NULL AND im.institution_code = v_inst_code)
+              )
+              AND im.role IN ('institution_admin', 'chief_proctor')
+              AND im.account_status = 'active'
+        ) THEN
+            RAISE EXCEPTION 'User % is not authorized to provision committee assignments for institution %',
+                v_assigner_uuid, COALESCE(v_inst_code, v_inst_uuid::text);
         END IF;
     END IF;
 
@@ -853,15 +876,26 @@ SET search_path = ''
 AS $$
 DECLARE
     v_case_uuid UUID;
+    v_case_type TEXT;
     v_inst_uuid UUID;
     v_inst_code TEXT;
     v_revoker_uuid UUID;
     v_res JSONB;
 BEGIN
-    v_revoker_uuid := COALESCE(p_revoked_by, auth.uid());
+    -- Runtime defense-in-depth check: fail-closed service_role authorization
+    IF COALESCE(current_setting('request.jwt.claim.role', true), '') <> 'service_role'
+       AND COALESCE(auth.role(), '') <> 'service_role' THEN
+        RAISE EXCEPTION 'Access denied: revoke_case_committee_assignment is restricted to backend service_role only.';
+    END IF;
 
-    SELECT c.id, cc.institution_uuid, cc.institution_id
-    INTO v_case_uuid, v_inst_uuid, v_inst_code
+    v_revoker_uuid := COALESCE(p_revoked_by, auth.uid());
+    IF v_revoker_uuid IS NULL THEN
+        RAISE EXCEPTION 'Revoker identity required';
+    END IF;
+
+    -- 1. Locate case and lock row
+    SELECT c.id, c.case_type, cc.institution_uuid, cc.institution_id
+    INTO v_case_uuid, v_case_type, v_inst_uuid, v_inst_code
     FROM public.cases c
     JOIN public.campus_cases cc ON cc.id = c.id
     WHERE c.case_id = p_case_id
@@ -871,30 +905,35 @@ BEGIN
         RAISE EXCEPTION 'Case % not found', p_case_id;
     END IF;
 
-    IF v_revoker_uuid IS NOT NULL THEN
-        IF NOT private.is_platform_admin() THEN
-            IF NOT EXISTS (
-                SELECT 1 FROM public.institution_memberships im
-                WHERE im.user_id = v_revoker_uuid
-                  AND (
-                      (v_inst_uuid IS NOT NULL AND im.institution_id = v_inst_uuid)
-                      OR (v_inst_uuid IS NULL AND im.institution_code = v_inst_code)
-                  )
-                  AND im.role IN ('institution_admin', 'chief_proctor')
-                  AND im.account_status = 'active'
-            ) THEN
-                RAISE EXCEPTION 'User % is not authorized to revoke committee assignments for institution %',
-                    v_revoker_uuid, COALESCE(v_inst_code, v_inst_uuid::text);
-            END IF;
+    IF v_case_type <> 'CAMPUS_GRIEVANCE' THEN
+        RAISE EXCEPTION 'Case % is not a campus grievance', p_case_id;
+    END IF;
+
+    -- 2. Verify revoker authorization
+    IF NOT private.is_platform_admin(v_revoker_uuid) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.institution_memberships im
+            WHERE im.user_id = v_revoker_uuid
+              AND (
+                  (v_inst_uuid IS NOT NULL AND im.institution_id = v_inst_uuid)
+                  OR (v_inst_uuid IS NULL AND im.institution_code = v_inst_code)
+              )
+              AND im.role IN ('institution_admin', 'chief_proctor')
+              AND im.account_status = 'active'
+        ) THEN
+            RAISE EXCEPTION 'User % is not authorized to revoke committee assignments for institution %',
+                v_revoker_uuid, COALESCE(v_inst_code, v_inst_uuid::text);
         END IF;
     END IF;
 
+    -- 3. Safe, consistent revocation: only active assignments can be revoked
     UPDATE public.case_committee_assignments
     SET
         assignment_status = 'revoked',
         revoked_at = timezone('utc'::text, now())
     WHERE case_uuid = v_case_uuid
       AND user_id = p_target_user_id
+      AND assignment_status = 'active'
     RETURNING jsonb_build_object(
         'assignment_id', id,
         'case_id', case_id,
@@ -963,7 +1002,7 @@ USING (
                   AND cca.user_id = auth.uid()
                   AND cca.assignment_status = 'active'
                   AND im.account_status = 'active'
-                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.role IN ('committee_member', 'institution_admin', 'chief_proctor')
             )
             -- Institution admin institutional oversight
             OR EXISTS (
@@ -1015,7 +1054,7 @@ USING (
                   AND cca.user_id = auth.uid()
                   AND cca.assignment_status = 'active'
                   AND im.account_status = 'active'
-                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.role IN ('committee_member', 'institution_admin', 'chief_proctor')
             )
             OR EXISTS (
                 SELECT 1 FROM public.institution_memberships im
@@ -1061,7 +1100,7 @@ WITH CHECK (
                   AND cca.user_id = auth.uid()
                   AND cca.assignment_status = 'active'
                   AND im.account_status = 'active'
-                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.role IN ('committee_member', 'institution_admin', 'chief_proctor')
             )
             OR EXISTS (
                 SELECT 1 FROM public.institution_memberships im
@@ -1215,7 +1254,7 @@ CREATE POLICY "Authorized users view case documents"
                         AND cca.user_id = auth.uid()
                         AND cca.assignment_status = 'active'
                         AND im.account_status = 'active'
-                        AND im.role IN ('committee_member', 'institution_admin')
+                        AND im.role IN ('committee_member', 'institution_admin', 'chief_proctor')
                   )
                   OR EXISTS (
                       SELECT 1 FROM public.institution_memberships im
@@ -1361,7 +1400,7 @@ CREATE POLICY "Officers and users can view authorized activity logs"
                                 AND cca.user_id = auth.uid()
                                 AND cca.assignment_status = 'active'
                                 AND im.account_status = 'active'
-                                AND im.role IN ('committee_member', 'institution_admin')
+                                AND im.role IN ('committee_member', 'institution_admin', 'chief_proctor')
                           )
                           OR EXISTS (
                               SELECT 1 FROM public.institution_memberships im
@@ -1541,7 +1580,7 @@ BEGIN
                                     AND cca.user_id = auth.uid()
                                     AND cca.assignment_status = 'active'
                                     AND im.account_status = 'active'
-                                    AND im.role IN ('committee_member', 'institution_admin')
+                                    AND im.role IN ('committee_member', 'institution_admin', 'chief_proctor')
                               )
                               OR EXISTS (
                                   SELECT 1 FROM public.institution_memberships im

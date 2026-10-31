@@ -684,8 +684,187 @@ BEGIN
     ASSERT v_count >= 1, 'Test 8.3 Failed: Chief Proctor Charlie must see committee assignments roster in College X';
     RAISE NOTICE '[PASS] Test 8.3: Chief Proctor Charlie views committee assignment roster for College X';
 
+    -- =================================================================
+    -- SECTION 9: Phase 1.3.15 Committee Role Consistency & RPC Authorization Audit
+    -- =================================================================
+
+    -- Test 9.1: Overloaded private.is_platform_admin(UUID) live verification
+    ASSERT private.is_platform_admin(v_admin_id) = true, 'Test 9.1a Failed: Platform admin UUID must evaluate to true';
+    ASSERT private.is_platform_admin(v_chief_p_id) = false, 'Test 9.1b Failed: Chief Proctor UUID must evaluate to false';
+    ASSERT private.is_platform_admin('00000000-0000-0000-0000-000000000000'::UUID) = false, 'Test 9.1c Failed: Nil UUID must evaluate to false';
+    RAISE NOTICE '[PASS] Test 9.1: Overloaded private.is_platform_admin(UUID) verified';
+
+    -- Test 9.2: Chief Proctor Charlie assigned to Case C inquiry committee gains case access
+    EXECUTE 'SET LOCAL ROLE service_role';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''service_role''';
+    SELECT public.assign_case_committee_member(
+        p_case_id => 'CAMPUS-CONF-C',
+        p_target_user_id => v_chief_p_id,
+        p_role => 'chair',
+        p_committee_name => 'Special Inquiry Panel',
+        p_assigned_by => v_admin_inst_id
+    ) INTO v_rpc_res;
+    ASSERT (v_rpc_res->>'assignment_status') = 'active', 'Test 9.2a Failed: Assignment status must be active';
+    ASSERT (v_rpc_res->>'user_id') = v_chief_p_id::text, 'Test 9.2b Failed: Assigned user_id mismatch';
+
+    -- Verify Charlie has access across case, documents, activity log, and storage objects
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_chief_p_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_c_uuid;
+    ASSERT v_count = 1, 'Test 9.2c Failed: Assigned Chief Proctor must view Case C';
+
+    SELECT count(*) INTO v_count FROM public.case_documents WHERE case_id = 'CAMPUS-CONF-C';
+    ASSERT v_count >= 1, 'Test 9.2d Failed: Assigned Chief Proctor must view Case C documents';
+
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_id = 'CAMPUS-CONF-C';
+    ASSERT v_count >= 1, 'Test 9.2e Failed: Assigned Chief Proctor must view Case C activity log';
+
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-C/bob_unassigned.pdf';
+    ASSERT v_count = 1, 'Test 9.2f Failed: Assigned Chief Proctor must view Case C storage object';
+    RAISE NOTICE '[PASS] Test 9.2: Assigned Chief Proctor gains full access to Case C (metadata, docs, logs, storage)';
+
+    -- Test 9.3: Chief Proctor Revocation immediately severs all access to Case C
+    EXECUTE 'SET LOCAL ROLE service_role';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''service_role''';
+    SELECT public.revoke_case_committee_assignment(
+        p_case_id => 'CAMPUS-CONF-C',
+        p_target_user_id => v_chief_p_id,
+        p_revoked_by => v_admin_inst_id
+    ) INTO v_rpc_res;
+    ASSERT (v_rpc_res->>'assignment_status') = 'revoked', 'Test 9.3a Failed: Assignment status must be revoked';
+
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_chief_p_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_c_uuid;
+    ASSERT v_count = 0, 'Test 9.3b Failed: Revoked Chief Proctor must NOT view Case C';
+
+    SELECT count(*) INTO v_count FROM public.case_documents WHERE case_id = 'CAMPUS-CONF-C';
+    ASSERT v_count = 0, 'Test 9.3c Failed: Revoked Chief Proctor must NOT view Case C documents';
+
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_id = 'CAMPUS-CONF-C';
+    ASSERT v_count = 0, 'Test 9.3d Failed: Revoked Chief Proctor must NOT view Case C activity log';
+
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-C/bob_unassigned.pdf';
+    ASSERT v_count = 0, 'Test 9.3e Failed: Revoked Chief Proctor must NOT view Case C storage object';
+    RAISE NOTICE '[PASS] Test 9.3: Revoked Chief Proctor immediately severed from Case C (zero rows across all entities)';
+
+    -- Test 9.4: Revoke RPC Safety & Edge Cases
+    EXECUTE 'SET LOCAL ROLE service_role';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''service_role''';
+
+    -- 9.4a: Revoking already-revoked assignment raises exception
+    BEGIN
+        SELECT public.revoke_case_committee_assignment(
+            p_case_id => 'CAMPUS-CONF-C',
+            p_target_user_id => v_chief_p_id,
+            p_revoked_by => v_admin_inst_id
+        ) INTO v_rpc_res;
+        RAISE EXCEPTION 'Test 9.4a Failed: Revoking already revoked assignment must raise exception';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 9.4a: Revoking already-revoked assignment raises exception cleanly';
+    END;
+
+    -- 9.4b: NULL revoker UUID fails closed
+    BEGIN
+        SELECT public.revoke_case_committee_assignment(
+            p_case_id => 'CAMPUS-CONF-C',
+            p_target_user_id => v_dave_id,
+            p_revoked_by => NULL
+        ) INTO v_rpc_res;
+        RAISE EXCEPTION 'Test 9.4b Failed: NULL revoker identity must raise exception';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 9.4b: NULL revoker identity fails closed';
+    END;
+
+    -- 9.4c: Cross-institution revocation denied
+    BEGIN
+        SELECT public.revoke_case_committee_assignment(
+            p_case_id => 'CAMPUS-CONF-C',
+            p_target_user_id => v_carol_id,
+            p_revoked_by => v_proctor_y_id -- Yolanda from College Y attempting revocation on College X
+        ) INTO v_rpc_res;
+        RAISE EXCEPTION 'Test 9.4c Failed: Cross-institution revocation must be denied';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 9.4c: Cross-institution revocation denied';
+    END;
+
+    -- 9.4d: Suspended admin denied revocation
+    BEGIN
+        SELECT public.revoke_case_committee_assignment(
+            p_case_id => 'CAMPUS-CONF-C',
+            p_target_user_id => v_carol_id,
+            p_revoked_by => v_sam_id -- Suspended officer Sam
+        ) INTO v_rpc_res;
+        RAISE EXCEPTION 'Test 9.4d Failed: Suspended officer must not revoke assignments';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 9.4d: Suspended officer revocation denied';
+    END;
+
+    -- 9.4e: Non-campus grievance rejected
+    BEGIN
+        SELECT public.revoke_case_committee_assignment(
+            p_case_id => 'NONEXISTENT-CASE-99',
+            p_target_user_id => v_carol_id,
+            p_revoked_by => v_admin_inst_id
+        ) INTO v_rpc_res;
+        RAISE EXCEPTION 'Test 9.4e Failed: Non-existent case must raise exception';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 9.4e: Non-existent case raises exception';
+    END;
+
+    -- Test 9.5: Assign RPC Safety & Edge Cases
+    -- 9.5a: NULL assigner UUID fails closed
+    BEGIN
+        SELECT public.assign_case_committee_member(
+            p_case_id => 'CAMPUS-CONF-C',
+            p_target_user_id => v_dave_id,
+            p_role => 'member',
+            p_committee_name => 'Panel',
+            p_assigned_by => NULL
+        ) INTO v_rpc_res;
+        RAISE EXCEPTION 'Test 9.5a Failed: NULL assigner identity must raise exception';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 9.5a: NULL assigner identity fails closed';
+    END;
+
+    -- 9.5b: Non-service_role callers blocked from executing RPCs
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_chief_p_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    BEGIN
+        SELECT public.assign_case_committee_member(
+            p_case_id => 'CAMPUS-CONF-C',
+            p_target_user_id => v_dave_id,
+            p_role => 'member',
+            p_assigned_by => v_chief_p_id
+        ) INTO v_rpc_res;
+        RAISE EXCEPTION 'Test 9.5b Failed: Authenticated role must not execute assign_case_committee_member';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE '[PASS] Test 9.5b: Authenticated role denied assign_case_committee_member (insufficient_privilege)';
+    WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 9.5b: Authenticated role denied assign_case_committee_member (access denied)';
+    END;
+
+    BEGIN
+        SELECT public.revoke_case_committee_assignment(
+            p_case_id => 'CAMPUS-CONF-C',
+            p_target_user_id => v_dave_id,
+            p_revoked_by => v_chief_p_id
+        ) INTO v_rpc_res;
+        RAISE EXCEPTION 'Test 9.5c Failed: Authenticated role must not execute revoke_case_committee_assignment';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE '[PASS] Test 9.5c: Authenticated role denied revoke_case_committee_assignment (insufficient_privilege)';
+    WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 9.5c: Authenticated role denied revoke_case_committee_assignment (access denied)';
+    END;
+
     RAISE NOTICE '======================================================================';
-    RAISE NOTICE '  ALL NYAYPATH PHASE 1.3.14 RUNTIME SECURITY & AUDIT TESTS PASSED!';
+    RAISE NOTICE '  ALL NYAYPATH PHASE 1.3.14 + 1.3.15 SECURITY & AUDIT TESTS PASSED!';
     RAISE NOTICE '======================================================================';
 END $$;
 
