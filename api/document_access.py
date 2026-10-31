@@ -305,6 +305,9 @@ class DocumentAccessManager:
     def _fetch_case(self, case_id: str) -> Optional[Dict[str, Any]]:
         if self.supabase:
             try:
+                res_campus = self.supabase.table("campus_cases").select("*").eq("case_id", case_id).execute()
+                if res_campus.data and len(res_campus.data) > 0:
+                    return res_campus.data[0]
                 res = self.supabase.table("cases").select("*").eq("case_id", case_id).execute()
                 if res.data and len(res.data) > 0:
                     return res.data[0]
