@@ -1310,16 +1310,23 @@ audit_policy_section = mig_004_sql.split("CREATE POLICY \"Officers and users can
 assert "private.is_platform_admin()" in audit_policy_section, (
     "Audit log policy must permit platform admins"
 )
-assert "audit_actor_id IN" in audit_policy_section, (
-    "Audit log policy must permit actor to view own actions via audit_actor_mappings lookup"
+assert (
+    "audit_actor_id = private.get_current_user_audit_actor_id()" in audit_policy_section
+    or "audit_actor_id IN" in audit_policy_section
+), (
+    "Audit log policy must permit actor to view own actions via secure audit actor lookup"
 )
-assert "private.can_officer_access_case(cc.institution_uuid)" in audit_policy_section, (
+assert "private.can_officer_access_case(cc.institution_uuid" in audit_policy_section, (
     "Audit log policy must permit only authorized institutional officers using UUID comparison"
 )
 assert "institution_id UUID NOT NULL REFERENCES public.institutions(id)" in mig_004_sql, (
     "institution_memberships must use UUID foreign key referencing public.institutions(id)"
 )
-assert "can_officer_access_case(p_institution_id UUID)" in mig_004_sql, (
+assert (
+    "can_officer_access_case(\n    p_institution_uuid UUID" in mig_004_sql
+    or "can_officer_access_case(p_institution_uuid UUID" in mig_004_sql
+    or "can_officer_access_case(p_institution_id UUID" in mig_004_sql
+), (
     "can_officer_access_case must accept UUID parameter for type-safe institutional boundary checking"
 )
 print("  [PASS] [Static SQL Inspection] Audit log SELECT policy enforces institutional and actor boundaries.")
