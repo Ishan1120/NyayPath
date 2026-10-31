@@ -80,6 +80,7 @@ class ProctorUpdateStatus(BaseModel):
     action_taken: Optional[str] = None
     resolution_details: Optional[str] = None
     assigned_proctor: Optional[str] = None
+    assigned_proctor_user_id: Optional[str] = None
     assigned_committee: Optional[str] = None
 
 class StudentTrackingRequest(BaseModel):
@@ -571,6 +572,7 @@ class CampusProctorManager:
                     "p_action_taken": payload.action_taken,
                     "p_resolution_details": payload.resolution_details,
                     "p_assigned_proctor": payload.assigned_proctor,
+                    "p_assigned_proctor_user_id": payload.assigned_proctor_user_id,
                     "p_assigned_committee": payload.assigned_committee,
                     "p_history": None  # Preserves existing history; does not bloat child table
                 }
@@ -605,6 +607,8 @@ class CampusProctorManager:
                 case["resolution_details"] = payload.resolution_details
             if payload.assigned_proctor is not None:
                 case["assigned_proctor"] = payload.assigned_proctor
+            if payload.assigned_proctor_user_id is not None:
+                case["assigned_proctor_user_id"] = payload.assigned_proctor_user_id
             if payload.assigned_committee is not None:
                 case["assigned_committee"] = payload.assigned_committee
             case["updated_at"] = now_iso
@@ -627,6 +631,7 @@ class CampusProctorManager:
                 "proctor_notes": payload.proctor_notes,
                 "hearing_date": validated_hearing_date,
                 "assigned_proctor": payload.assigned_proctor,
+                "assigned_proctor_user_id": payload.assigned_proctor_user_id,
                 "assigned_committee": payload.assigned_committee
             },
             actor_user=proctor_user,

@@ -95,6 +95,7 @@ def validate_all_migrations():
         "public.profiles",
         "public.institutions",
         "public.institution_memberships",
+        "public.case_committee_assignments",
         "public.confidential_student_identities",
         "public.case_documents",
         "public.audit_actor_mappings",
@@ -104,7 +105,7 @@ def validate_all_migrations():
     }
     missing_tables = expected_tables - defined_tables
     assert not missing_tables, f"Missing required platform tables: {missing_tables}"
-    print(f"\n[SUCCESS] All 13 platform tables successfully declared exactly once with valid linear dependencies.")
+    print(f"\n[SUCCESS] All {len(expected_tables)} platform tables successfully declared exactly once with valid linear dependencies.")
     print("=" * 70)
 
 if __name__ == "__main__":

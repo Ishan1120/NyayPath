@@ -343,7 +343,8 @@ CREATE OR REPLACE FUNCTION public.update_campus_grievance_status(
     p_resolution_details TEXT DEFAULT NULL,
     p_assigned_proctor TEXT DEFAULT NULL,
     p_assigned_committee TEXT DEFAULT NULL,
-    p_history JSONB DEFAULT NULL
+    p_history JSONB DEFAULT NULL,
+    p_assigned_proctor_user_id UUID DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -355,6 +356,9 @@ DECLARE
     v_actual_case_type VARCHAR(64);
     v_updated_at TIMESTAMPTZ := timezone('utc'::text, now());
     v_child_updated_count INT;
+    v_resolved_proctor_uuid UUID;
+    v_child_inst_uuid UUID;
+    v_child_inst_code TEXT;
     v_result JSONB;
 BEGIN
     -- Runtime defense-in-depth check: fail-closed role check (NULL claims or non-service_role rejected)
@@ -378,10 +382,41 @@ BEGIN
     END IF;
 
     -- 2. Verify child campus_cases record exists before updating (Task 1)
-    IF NOT EXISTS (
-        SELECT 1 FROM public.campus_cases cc WHERE cc.id = v_case_uuid FOR UPDATE
-    ) THEN
+    SELECT institution_uuid, institution_id INTO v_child_inst_uuid, v_child_inst_code
+    FROM public.campus_cases cc
+    WHERE cc.id = v_case_uuid
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
         RAISE EXCEPTION 'Campus case record not found for parent case % (id: %)', p_case_id, v_case_uuid;
+    END IF;
+
+    -- 2b. Canonical proctor assignment resolution & validation (Phase 1.3.13)
+    IF p_assigned_proctor_user_id IS NOT NULL THEN
+        v_resolved_proctor_uuid := p_assigned_proctor_user_id;
+    ELSIF p_assigned_proctor IS NOT NULL THEN
+        BEGIN
+            v_resolved_proctor_uuid := p_assigned_proctor::UUID;
+        EXCEPTION WHEN OTHERS THEN
+            v_resolved_proctor_uuid := NULL;
+        END;
+    END IF;
+
+    -- If a proctor UUID is being assigned, verify active institutional officer status
+    IF v_resolved_proctor_uuid IS NOT NULL THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM public.institution_memberships im
+            WHERE im.user_id = v_resolved_proctor_uuid
+              AND (
+                  (v_child_inst_uuid IS NOT NULL AND im.institution_id = v_child_inst_uuid)
+                  OR (v_child_inst_uuid IS NULL AND im.institution_code = v_child_inst_code)
+              )
+              AND im.role IN ('proctor', 'chief_proctor', 'committee_member', 'institution_admin')
+              AND im.account_status = 'active'
+        ) THEN
+            RAISE EXCEPTION 'Assigned proctor % lacks an active officer membership in institution %',
+                v_resolved_proctor_uuid, v_child_inst_code;
+        END IF;
     END IF;
 
     -- 3. Update authoritative parent in public.cases
@@ -403,6 +438,7 @@ BEGIN
         action_taken = COALESCE(p_action_taken, action_taken),
         resolution_details = COALESCE(p_resolution_details, resolution_details),
         assigned_proctor = COALESCE(p_assigned_proctor, assigned_proctor),
+        assigned_proctor_user_id = COALESCE(v_resolved_proctor_uuid, assigned_proctor_user_id),
         assigned_committee = COALESCE(p_assigned_committee, assigned_committee),
         history = CASE
             WHEN p_history IS NOT NULL AND jsonb_array_length(p_history) > 0 THEN
@@ -426,6 +462,7 @@ BEGIN
         'action_taken', cc.action_taken,
         'resolution_details', cc.resolution_details,
         'assigned_proctor', cc.assigned_proctor,
+        'assigned_proctor_user_id', cc.assigned_proctor_user_id,
         'assigned_committee', cc.assigned_committee
     ) INTO v_result
     FROM public.campus_cases cc
@@ -437,11 +474,11 @@ END;
 $$;
 
 REVOKE ALL PRIVILEGES ON FUNCTION public.update_campus_grievance_status(
-    VARCHAR(64), VARCHAR(64), TEXT, DATE, TEXT, TEXT, TEXT, TEXT, JSONB
+    VARCHAR(64), VARCHAR(64), TEXT, DATE, TEXT, TEXT, TEXT, TEXT, JSONB, UUID
 ) FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.update_campus_grievance_status(
-    VARCHAR(64), VARCHAR(64), TEXT, DATE, TEXT, TEXT, TEXT, TEXT, JSONB
+    VARCHAR(64), VARCHAR(64), TEXT, DATE, TEXT, TEXT, TEXT, TEXT, JSONB, UUID
 ) TO service_role;
 
 -- =====================================================================
@@ -623,6 +660,57 @@ $$;
 REVOKE ALL PRIVILEGES ON FUNCTION private.can_officer_access_case(UUID, TEXT) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION private.can_officer_access_case(UUID, TEXT) TO authenticated, service_role;
 
+-- Ensure canonical UUID assignment column exists on public.campus_cases
+ALTER TABLE public.campus_cases ADD COLUMN IF NOT EXISTS assigned_proctor_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_campus_cases_assigned_proctor_uuid ON public.campus_cases(assigned_proctor_user_id) WHERE assigned_proctor_user_id IS NOT NULL;
+
+-- =====================================================================
+-- 8a. PUBLIC.CASE_COMMITTEE_ASSIGNMENTS (Case-Specific Committee Roster)
+-- =====================================================================
+-- Associates specific committee members with specific grievances.
+-- Avoids granting broad institutional access to confidential grievances.
+
+CREATE TABLE IF NOT EXISTS public.case_committee_assignments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    case_uuid UUID NOT NULL REFERENCES public.cases(id) ON DELETE CASCADE,
+    case_id VARCHAR(64) NOT NULL,
+    user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+    institution_uuid UUID REFERENCES public.institutions(id) ON DELETE CASCADE,
+    committee_name TEXT,
+    role VARCHAR(32) NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'chair', 'convenor', 'investigator')),
+    assignment_status VARCHAR(16) NOT NULL DEFAULT 'active' CHECK (assignment_status IN ('active', 'inactive', 'revoked')),
+    assigned_by UUID REFERENCES auth.users(id),
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    revoked_at TIMESTAMPTZ,
+    CONSTRAINT uq_case_committee_assignment UNIQUE (case_uuid, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_case_committee_case ON public.case_committee_assignments(case_uuid);
+CREATE INDEX IF NOT EXISTS idx_case_committee_user ON public.case_committee_assignments(user_id);
+CREATE INDEX IF NOT EXISTS idx_case_committee_active ON public.case_committee_assignments(case_uuid, user_id) WHERE assignment_status = 'active';
+
+ALTER TABLE public.case_committee_assignments ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL PRIVILEGES ON public.case_committee_assignments FROM PUBLIC, anon, authenticated;
+GRANT SELECT ON public.case_committee_assignments TO authenticated;
+GRANT ALL PRIVILEGES ON public.case_committee_assignments TO service_role;
+
+DROP POLICY IF EXISTS "Users view case committee assignments" ON public.case_committee_assignments;
+CREATE POLICY "Users view case committee assignments"
+ON public.case_committee_assignments FOR SELECT
+TO authenticated
+USING (
+    private.is_platform_admin()
+    OR user_id = auth.uid()
+    OR EXISTS (
+        SELECT 1 FROM public.institution_memberships im
+        WHERE im.user_id = auth.uid()
+          AND im.institution_id = case_committee_assignments.institution_uuid
+          AND im.role IN ('institution_admin', 'chief_proctor')
+          AND im.account_status = 'active'
+    )
+);
+
 -- =====================================================================
 -- 8b. AUTHORITATIVE CAMPUS_CASES RLS POLICIES (Institutional Scoping & Confidentiality Gating)
 -- =====================================================================
@@ -630,7 +718,8 @@ GRANT EXECUTE ON FUNCTION private.can_officer_access_case(UUID, TEXT) TO authent
 -- Enforces:
 -- 1. Standard / non-confidential grievances: viewable by all active institution officers for triage.
 -- 2. Confidential / strict-confidential grievances: strictly viewable only by directly assigned proctor
---    or authorized committee members / institution admins. Unassigned proctors are blocked.
+--    (verified via authenticated user UUID) or case-specific assigned committee members / institution admins.
+--    Unassigned proctors and unassigned committee members are blocked. Name spoofing is eliminated.
 
 DROP POLICY IF EXISTS "Officers view institutional grievances" ON public.campus_cases;
 CREATE POLICY "Officers view institutional grievances"
@@ -641,12 +730,19 @@ USING (
     OR (
         private.can_officer_access_case(institution_uuid, institution_id)
         AND (
+            -- Standard/non-confidential grievances viewable for institutional triage
             confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
-            OR assigned_proctor = auth.uid()::text
+            -- Directly assigned proctor (strictly verified via authenticated user UUID; never mutable display names)
+            OR assigned_proctor_user_id = auth.uid()
+            OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text)
+            -- Case-specific committee assignment (verified via user UUID and active assignment status)
             OR EXISTS (
-                SELECT 1 FROM public.profiles p
-                WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = campus_cases.assigned_proctor
+                SELECT 1 FROM public.case_committee_assignments cca
+                WHERE cca.case_uuid = campus_cases.id
+                  AND cca.user_id = auth.uid()
+                  AND cca.assignment_status = 'active'
             )
+            -- Institution admin institutional oversight
             OR EXISTS (
                 SELECT 1 FROM public.institution_memberships im
                 WHERE im.user_id = auth.uid()
@@ -654,7 +750,7 @@ USING (
                       (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
                       OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
                   )
-                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.role = 'institution_admin'
                   AND im.account_status = 'active'
             )
         )
@@ -671,10 +767,13 @@ USING (
         private.can_officer_access_case(institution_uuid, institution_id)
         AND (
             confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
-            OR assigned_proctor = auth.uid()::text
+            OR assigned_proctor_user_id = auth.uid()
+            OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text)
             OR EXISTS (
-                SELECT 1 FROM public.profiles p
-                WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = campus_cases.assigned_proctor
+                SELECT 1 FROM public.case_committee_assignments cca
+                WHERE cca.case_uuid = campus_cases.id
+                  AND cca.user_id = auth.uid()
+                  AND cca.assignment_status = 'active'
             )
             OR EXISTS (
                 SELECT 1 FROM public.institution_memberships im
@@ -683,7 +782,7 @@ USING (
                       (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
                       OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
                   )
-                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.role = 'institution_admin'
                   AND im.account_status = 'active'
             )
         )
@@ -695,10 +794,13 @@ WITH CHECK (
         private.can_officer_access_case(institution_uuid, institution_id)
         AND (
             confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
-            OR assigned_proctor = auth.uid()::text
+            OR assigned_proctor_user_id = auth.uid()
+            OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text)
             OR EXISTS (
-                SELECT 1 FROM public.profiles p
-                WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = campus_cases.assigned_proctor
+                SELECT 1 FROM public.case_committee_assignments cca
+                WHERE cca.case_uuid = campus_cases.id
+                  AND cca.user_id = auth.uid()
+                  AND cca.assignment_status = 'active'
             )
             OR EXISTS (
                 SELECT 1 FROM public.institution_memberships im
@@ -707,7 +809,7 @@ WITH CHECK (
                       (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
                       OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
                   )
-                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.role = 'institution_admin'
                   AND im.account_status = 'active'
             )
         )
@@ -827,9 +929,13 @@ CREATE POLICY "Authorized users view case documents"
               AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
               AND (
                   (cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL') AND case_documents.is_confidential IS NOT TRUE)
-                  OR cc.assigned_proctor = auth.uid()::text
-                  OR cc.assigned_proctor IN (
-                      SELECT p.full_name FROM public.profiles p WHERE p.id = auth.uid() AND p.full_name IS NOT NULL
+                  OR cc.assigned_proctor_user_id = auth.uid()
+                  OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text)
+                  OR EXISTS (
+                      SELECT 1 FROM public.case_committee_assignments cca
+                      WHERE cca.case_uuid = cc.id
+                        AND cca.user_id = auth.uid()
+                        AND cca.assignment_status = 'active'
                   )
                   OR EXISTS (
                       SELECT 1 FROM public.institution_memberships im
@@ -838,7 +944,7 @@ CREATE POLICY "Authorized users view case documents"
                             (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
                             OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
                         )
-                        AND im.role IN ('committee_member', 'institution_admin')
+                        AND im.role = 'institution_admin'
                         AND im.account_status = 'active'
                   )
               )
@@ -926,10 +1032,7 @@ CREATE POLICY "Officers and users can view authorized activity logs"
         -- 1. Platform admins can view all activity logs
         private.is_platform_admin()
         OR
-        -- 2. Authenticated users can view actions associated with their active audit_actor_id
-        audit_actor_id = private.get_current_user_audit_actor_id()
-        OR
-        -- 3. Case activity log viewing for student case owner and authorized institutional officers
+        -- 2. Case activity log viewing for student case owner and authorized institutional officers
         EXISTS (
             SELECT 1 FROM public.campus_cases cc
             WHERE cc.id = case_activity_log.case_uuid
@@ -937,15 +1040,29 @@ CREATE POLICY "Officers and users can view authorized activity logs"
                   -- Student case owner can view activity logs for their own grievance
                   cc.student_user_id = auth.uid()
                   OR
-                  -- Institutional officers enforcing institutional scope & confidentiality
+                  -- Non-confidential case: active institutional officers or acting user can view
                   (
-                      private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
+                      cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
                       AND (
-                          cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
-                          OR cc.assigned_proctor = auth.uid()::text
+                          audit_actor_id = private.get_current_user_audit_actor_id()
+                          OR private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
+                      )
+                  )
+                  OR
+                  -- Confidential case: strictly requires CURRENT authorized officer status
+                  -- (Directly assigned proctor, actively assigned committee member, or institution admin).
+                  -- Past proctors or revoked committee members CANNOT view logs via past audit_actor_id!
+                  (
+                      cc.confidentiality_mode IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
+                      AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
+                      AND (
+                          cc.assigned_proctor_user_id = auth.uid()
+                          OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text)
                           OR EXISTS (
-                              SELECT 1 FROM public.profiles p
-                              WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = cc.assigned_proctor
+                              SELECT 1 FROM public.case_committee_assignments cca
+                              WHERE cca.case_uuid = cc.id
+                                AND cca.user_id = auth.uid()
+                                AND cca.assignment_status = 'active'
                           )
                           OR EXISTS (
                               SELECT 1 FROM public.institution_memberships im
@@ -954,7 +1071,7 @@ CREATE POLICY "Officers and users can view authorized activity logs"
                                     (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
                                     OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
                                 )
-                                AND im.role IN ('committee_member', 'institution_admin')
+                                AND im.role = 'institution_admin'
                                 AND im.account_status = 'active'
                           )
                       )
@@ -1100,9 +1217,13 @@ BEGIN
                           AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
                           AND (
                               (cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL') AND cd.is_confidential IS NOT TRUE)
-                              OR cc.assigned_proctor = auth.uid()::text
-                              OR cc.assigned_proctor IN (
-                                  SELECT p.full_name FROM public.profiles p WHERE p.id = auth.uid() AND p.full_name IS NOT NULL
+                              OR cc.assigned_proctor_user_id = auth.uid()
+                              OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text)
+                              OR EXISTS (
+                                  SELECT 1 FROM public.case_committee_assignments cca
+                                  WHERE cca.case_uuid = cc.id
+                                    AND cca.user_id = auth.uid()
+                                    AND cca.assignment_status = 'active'
                               )
                               OR EXISTS (
                                   SELECT 1 FROM public.institution_memberships im
@@ -1111,7 +1232,7 @@ BEGIN
                                         (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
                                         OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
                                     )
-                                    AND im.role IN ('committee_member', 'institution_admin')
+                                    AND im.role = 'institution_admin'
                                     AND im.account_status = 'active'
                               )
                           )

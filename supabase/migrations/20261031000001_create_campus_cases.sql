@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS public.campus_cases (
     resolution_details TEXT,
     resolution_deadline DATE,
     assigned_proctor TEXT,
+    assigned_proctor_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
     assigned_committee TEXT,
     supporting_documents JSONB NOT NULL DEFAULT '[]'::jsonb,
     verification_key_hash TEXT NOT NULL,
@@ -56,6 +57,7 @@ CREATE INDEX IF NOT EXISTS idx_campus_cases_institution ON public.campus_cases(i
 CREATE INDEX IF NOT EXISTS idx_campus_cases_status ON public.campus_cases(status);
 CREATE INDEX IF NOT EXISTS idx_campus_cases_created_at ON public.campus_cases(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_campus_cases_student_user ON public.campus_cases(student_user_id) WHERE student_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_campus_cases_assigned_proctor_uuid ON public.campus_cases(assigned_proctor_user_id) WHERE assigned_proctor_user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_campus_cases_verification ON public.campus_cases(case_id, verification_key_hash);
 
 -- 4. Automatic updated_at trigger function

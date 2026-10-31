@@ -149,14 +149,47 @@ class DocumentAccessManager:
             )
 
             # Check if assigned or general institutional authority
+            assigned_proctor_user_id = case.get("assigned_proctor_user_id")
             assigned_proctor = case.get("assigned_proctor")
-            if assigned_proctor and (assigned_proctor == user.name or assigned_proctor == user.user_id):
+            
+            # Strictly use canonical UUID identity for proctor assignment
+            is_assigned_proctor = False
+            if assigned_proctor_user_id and str(assigned_proctor_user_id).lower() == str(user.user_id).lower():
+                is_assigned_proctor = True
+            elif not assigned_proctor_user_id and assigned_proctor:
+                # Compatibility fallback for UUID stored in assigned_proctor or offline simulation
+                if str(assigned_proctor).lower() == str(user.user_id).lower() or (not is_confidential and assigned_proctor == user.name):
+                    is_assigned_proctor = True
+
+            # Check if user is actively assigned to committee inquiry for this case
+            is_assigned_committee = False
+            if user.role == UserRole.COMMITTEE_MEMBER:
+                if self.supabase and case.get("id"):
+                    try:
+                        res_comm = self.supabase.table("case_committee_assignments").select("id").eq(
+                            "case_uuid", case["id"]
+                        ).eq(
+                            "user_id", user.user_id
+                        ).eq(
+                            "assignment_status", "active"
+                        ).execute()
+                        if res_comm.data and len(res_comm.data) > 0:
+                            is_assigned_committee = True
+                    except Exception as e:
+                        logger.warning(f"Error checking case_committee_assignments: {e}")
+                else:
+                    # In local simulation / offline unit testing where Supabase is not connected
+                    is_assigned_committee = True
+
+            if is_assigned_proctor:
                 return self._create_signed_url(case_id, document_id, access_type="ASSIGNED_PROCTOR")
-            elif user.role in [UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN]:
+            elif user.role == UserRole.INSTITUTION_ADMIN:
+                return self._create_signed_url(case_id, document_id, access_type="INSTITUTION_ADMIN")
+            elif is_assigned_committee:
                 return self._create_signed_url(case_id, document_id, access_type="COMMITTEE_MEMBER")
             else:
-                # Unassigned proctor in same institution:
-                # Permitted for standard/public cases (institutional intake triage);
+                # Unassigned proctor or unassigned committee member in same institution:
+                # Permitted only for standard non-confidential cases (institutional intake triage);
                 # Strictly DENIED for confidential grievances without explicit case assignment
                 if is_confidential:
                     raise HTTPException(

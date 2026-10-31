@@ -1,5 +1,5 @@
 -- =====================================================================
--- NyayPath Phase 1.3.12 Runtime RLS, Storage & Confidentiality Verification
+-- NyayPath Phase 1.3.13 Runtime RLS, Storage & Assignment Verification
 -- =====================================================================
 
 BEGIN;
@@ -12,6 +12,7 @@ DECLARE
     v_proctor_x_id UUID := 'cccccccc-1111-2222-3333-cccccccccccc';
     v_proctor_y_id UUID := 'dddddddd-1111-2222-3333-dddddddddddd';
     v_carol_id     UUID := 'eeeeeeee-1111-2222-3333-eeeeeeeeeeee';
+    v_dave_id      UUID := '77777777-1111-2222-3333-777777777777';
     v_sam_id       UUID := 'ffffffff-1111-2222-3333-ffffffffffff';
     v_admin_id     UUID := '99999999-1111-2222-3333-999999999999';
     
@@ -30,12 +31,26 @@ DECLARE
     v_bob_actor   UUID := gen_random_uuid();
     v_xavier_actor UUID:= gen_random_uuid();
     v_carol_actor  UUID:= gen_random_uuid();
+    v_dave_actor   UUID:= gen_random_uuid();
 
     v_count INT;
     v_rpc_res JSONB;
 BEGIN
     RAISE NOTICE '--- SETUP: Creating disposable test fixtures as superuser/postgres ---';
     
+    -- Cleanup previous test data to ensure clean idempotency
+    TRUNCATE TABLE public.case_activity_log CASCADE;
+    DELETE FROM public.case_documents WHERE case_id LIKE 'CAMPUS-%';
+    DELETE FROM public.case_committee_assignments WHERE case_id LIKE 'CAMPUS-%';
+    DELETE FROM public.campus_cases WHERE case_id LIKE 'CAMPUS-%';
+    DELETE FROM public.cases WHERE case_id LIKE 'CAMPUS-%';
+    DELETE FROM public.audit_actor_mappings WHERE user_id IN (v_student_a_id, v_student_b_id, v_proctor_x_id, v_proctor_y_id, v_carol_id, v_dave_id);
+    DELETE FROM public.institution_memberships WHERE user_id IN (v_proctor_x_id, v_proctor_y_id, v_carol_id, v_dave_id, v_sam_id);
+    DELETE FROM public.platform_admins WHERE user_id = v_admin_id;
+    DELETE FROM public.profiles WHERE id IN (v_student_a_id, v_student_b_id, v_proctor_x_id, v_proctor_y_id, v_carol_id, v_dave_id, v_sam_id, v_admin_id);
+    DELETE FROM auth.users WHERE id IN (v_student_a_id, v_student_b_id, v_proctor_x_id, v_proctor_y_id, v_carol_id, v_dave_id, v_sam_id, v_admin_id);
+    DELETE FROM public.institutions WHERE id IN (v_inst_x_uuid, v_inst_y_uuid);
+
     -- 0. Insert mock auth.users inside transaction
     INSERT INTO auth.users (id, email, is_sso_user, is_anonymous)
     VALUES 
@@ -44,18 +59,22 @@ BEGIN
         (v_proctor_x_id, 'xavier@college-x.edu', FALSE, FALSE),
         (v_proctor_y_id, 'yolanda@college-y.edu', FALSE, FALSE),
         (v_carol_id, 'carol@college-x.edu', FALSE, FALSE),
+        (v_dave_id, 'dave@college-x.edu', FALSE, FALSE),
         (v_sam_id, 'sam@college-x.edu', FALSE, FALSE),
-        (v_admin_id, 'admin@nyaypath.gov.in', FALSE, FALSE);
+        (v_admin_id, 'admin@nyaypath.gov.in', FALSE, FALSE)
+    ON CONFLICT (id) DO NOTHING;
 
     -- 1. Create test institutions
     INSERT INTO public.institutions (id, code, name, city, state, is_active)
     VALUES 
         (v_inst_x_uuid, 'COLLEGE_X', 'College X Institute of Tech', 'City X', 'State X', TRUE),
-        (v_inst_y_uuid, 'COLLEGE_Y', 'College Y Institute of Law', 'City Y', 'State Y', TRUE);
+        (v_inst_y_uuid, 'COLLEGE_Y', 'College Y Institute of Law', 'City Y', 'State Y', TRUE)
+    ON CONFLICT (id) DO NOTHING;
 
     -- 2. Platform Admin
     INSERT INTO public.platform_admins (user_id, email, account_status)
-    VALUES (v_admin_id, 'admin@nyaypath.gov.in', 'active');
+    VALUES (v_admin_id, 'admin@nyaypath.gov.in', 'active')
+    ON CONFLICT (user_id) DO NOTHING;
 
     -- 3. Create test profiles
     INSERT INTO public.profiles (id, full_name, email, role, account_status)
@@ -65,6 +84,7 @@ BEGIN
         (v_proctor_x_id, 'Proctor Xavier', 'xavier@college-x.edu', 'proctor', 'active'),
         (v_proctor_y_id, 'Proctor Yolanda', 'yolanda@college-y.edu', 'proctor', 'active'),
         (v_carol_id, 'Committee Carol', 'carol@college-x.edu', 'committee_member', 'active'),
+        (v_dave_id, 'Committee Dave', 'dave@college-x.edu', 'committee_member', 'active'),
         (v_sam_id, 'Proctor Sam', 'sam@college-x.edu', 'proctor', 'suspended'),
         (v_admin_id, 'Platform Admin', 'admin@nyaypath.gov.in', 'platform_admin', 'active');
 
@@ -73,6 +93,7 @@ BEGIN
     VALUES
         (v_proctor_x_id, v_inst_x_uuid, 'COLLEGE_X', 'proctor', 'active'),
         (v_carol_id, v_inst_x_uuid, 'COLLEGE_X', 'committee_member', 'active'),
+        (v_dave_id, v_inst_x_uuid, 'COLLEGE_X', 'committee_member', 'active'),
         (v_sam_id, v_inst_x_uuid, 'COLLEGE_X', 'proctor', 'suspended'),
         (v_proctor_y_id, v_inst_y_uuid, 'COLLEGE_Y', 'proctor', 'active');
 
@@ -82,7 +103,8 @@ BEGIN
         (v_alice_actor, v_student_a_id),
         (v_bob_actor, v_student_b_id),
         (v_xavier_actor, v_proctor_x_id),
-        (v_carol_actor, v_carol_id);
+        (v_carol_actor, v_carol_id),
+        (v_dave_actor, v_dave_id);
 
     -- 6. Campus Cases
     -- Case A: Standard grievance by Alice, unassigned
@@ -96,26 +118,26 @@ BEGIN
         'NORMAL', 'SUBMITTED', 'hash_case_a'
     );
 
-    -- Case B: Confidential grievance by Bob, assigned to Xavier
+    -- Case B: Confidential grievance by Bob, assigned to Xavier (canonical UUID)
     INSERT INTO public.campus_cases (
         id, case_id, institution_id, institution_uuid, student_user_id, student_name,
         department, year, category, subject, description, is_anonymous, confidentiality_mode,
-        severity, status, assigned_proctor, verification_key_hash
+        severity, status, assigned_proctor, assigned_proctor_user_id, verification_key_hash
     ) VALUES (
         v_case_b_uuid, 'CAMPUS-CONF-B', 'COLLEGE_X', v_inst_x_uuid, v_student_b_id, 'Student Bob',
         'CSE', '2nd', 'HARASSMENT', 'Subject B', 'Desc B', FALSE, 'CONFIDENTIAL',
-        'URGENT', 'UNDER_INQUIRY', v_proctor_x_id::text, 'hash_case_b'
+        'URGENT', 'UNDER_INQUIRY', 'Proctor Xavier', v_proctor_x_id, 'hash_case_b'
     );
 
-    -- Case C: Confidential grievance by Bob, UNASSIGNED
+    -- Case C: Confidential grievance by Bob, UNASSIGNED proctor, inquiry assigned to Committee Carol
     INSERT INTO public.campus_cases (
         id, case_id, institution_id, institution_uuid, student_user_id, student_name,
         department, year, category, subject, description, is_anonymous, confidentiality_mode,
-        severity, status, assigned_proctor, verification_key_hash
+        severity, status, assigned_proctor, assigned_proctor_user_id, verification_key_hash
     ) VALUES (
         v_case_c_uuid, 'CAMPUS-CONF-C', 'COLLEGE_X', v_inst_x_uuid, v_student_b_id, 'Student Bob',
         'MECH', '4th', 'DISCRIMINATION', 'Subject C', 'Desc C', FALSE, 'CONFIDENTIAL',
-        'HIGH', 'SUBMITTED', NULL, 'hash_case_c'
+        'HIGH', 'SUBMITTED', NULL, NULL, 'hash_case_c'
     );
 
     -- Case Y: Belongs to College Y
@@ -127,6 +149,14 @@ BEGIN
         v_case_y_uuid, 'CAMPUS-INST-Y', 'COLLEGE_Y', v_inst_y_uuid,
         'LAW', '1st', 'ACADEMIC', 'Subject Y', 'Desc Y', TRUE, 'NORMAL',
         'NORMAL', 'SUBMITTED', 'hash_case_y'
+    );
+
+    -- 6b. Case-Specific Committee Assignments
+    -- Carol is actively assigned to Case C inquiry; Dave is NOT assigned
+    INSERT INTO public.case_committee_assignments (
+        case_uuid, case_id, user_id, assigned_by, assignment_status
+    ) VALUES (
+        v_case_c_uuid, 'CAMPUS-CONF-C', v_carol_id, v_admin_id, 'active'
     );
 
     -- 7. Case Documents
@@ -141,14 +171,18 @@ BEGIN
         ('case-documents', 'CAMPUS-STD-A/alice_doc.pdf', v_student_a_id),
         ('case-documents', 'CAMPUS-CONF-B/bob_assigned.pdf', v_student_b_id),
         ('case-documents', 'CAMPUS-CONF-C/bob_unassigned.pdf', v_student_b_id),
-        ('case-documents', 'CAMPUS-INST-Y/yolanda_doc.pdf', v_proctor_y_id);
+        ('case-documents', 'CAMPUS-INST-Y/yolanda_doc.pdf', v_proctor_y_id)
+    ON CONFLICT DO NOTHING;
 
     -- 9. Case Activity Logs
+    -- Notice: Xavier performed past triage on Case C, but Xavier is NOT currently assigned to Case C
     INSERT INTO public.case_activity_log (case_uuid, case_id, audit_actor_id, actor_type, actor_role, action_type, action_details) VALUES
         (v_case_a_uuid, 'CAMPUS-STD-A', v_alice_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"action":"grievance submitted"}'::jsonb),
         (v_case_b_uuid, 'CAMPUS-CONF-B', v_bob_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"action":"confidential grievance submitted"}'::jsonb),
         (v_case_b_uuid, 'CAMPUS-CONF-B', v_xavier_actor, 'USER', 'proctor', 'SCHEDULE_HEARING', '{"hearing_date":"2026-11-05"}'::jsonb),
-        (v_case_c_uuid, 'CAMPUS-CONF-C', v_bob_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"action":"unassigned confidential grievance submitted"}'::jsonb);
+        (v_case_c_uuid, 'CAMPUS-CONF-C', v_bob_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"action":"unassigned confidential grievance submitted"}'::jsonb),
+        (v_case_c_uuid, 'CAMPUS-CONF-C', v_xavier_actor, 'USER', 'proctor', 'INITIAL_TRIAGE_NOTE', '{"action":"former proctor triage entry"}'::jsonb),
+        (v_case_c_uuid, 'CAMPUS-CONF-C', v_carol_actor, 'USER', 'committee_member', 'COMMITTEE_REVIEW', '{"action":"committee review begun"}'::jsonb);
 
     RAISE NOTICE '--- TEST SUITE EXECUTION ---';
 
@@ -170,7 +204,7 @@ BEGIN
     RAISE NOTICE '[PASS] Test 1.2: Student A cannot see Student B case';
 
     -- =================================================================
-    -- SECTION 2: Confidential Grievance SELECT Isolation
+    -- SECTION 2: Confidential Grievance SELECT Isolation & Spoofing Defense
     -- =================================================================
     -- Test 2.1: Unassigned Proctor X reads standard grievance within institution (Case A)
     EXECUTE 'SET LOCAL ROLE authenticated';
@@ -191,14 +225,41 @@ BEGIN
     ASSERT v_count = 1, 'Test 2.3 Failed: Assigned Proctor X must see assigned confidential Case B';
     RAISE NOTICE '[PASS] Test 2.3: Assigned Proctor X can read assigned confidential grievance';
 
-    -- Test 2.4: Committee member Carol CAN read unassigned confidential grievance (Case C)
+    -- Test 2.4: Case-assigned Committee member Carol CAN read confidential grievance (Case C)
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_carol_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
     SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_c_uuid;
-    ASSERT v_count = 1, 'Test 2.4 Failed: Committee member Carol must see confidential Case C';
-    RAISE NOTICE '[PASS] Test 2.4: Committee member Carol can read institutional confidential grievance';
+    ASSERT v_count = 1, 'Test 2.4 Failed: Case-assigned Committee member Carol must see confidential Case C';
+    RAISE NOTICE '[PASS] Test 2.4: Case-assigned Committee member Carol can read Case C';
+
+    -- Test 2.5: Unassigned Committee member Dave in same institution CANNOT read confidential grievance (Case C)
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_dave_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_c_uuid;
+    ASSERT v_count = 0, 'Test 2.5 Failed: Unassigned Committee member Dave must NOT see confidential Case C!';
+    RAISE NOTICE '[PASS] Test 2.5: Unassigned Committee member Dave strictly BLOCKED from Case C';
+
+    -- Test 2.6: Proctor-Name Spoofing Defense:
+    -- An attacker (Dave) modifies his profiles.full_name to match assigned proctor ''Proctor Xavier''
+    EXECUTE 'SET LOCAL ROLE postgres';
+    UPDATE public.profiles SET full_name = 'Proctor Xavier' WHERE id = v_dave_id;
+
+    -- Dave attempts to query Case B (assigned to Xavier) using spoofed display name
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_dave_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_b_uuid;
+    ASSERT v_count = 0, 'Test 2.6 Failed: Name-spoofing attacker must NOT access Case B (must be 0 rows)!';
+    RAISE NOTICE '[PASS] Test 2.6: Proctor-name spoofing defense verified: RLS enforces canonical UUID, not display name';
+
+    -- Restore Dave''s profile name
+    EXECUTE 'SET LOCAL ROLE postgres';
+    UPDATE public.profiles SET full_name = 'Committee Dave' WHERE id = v_dave_id;
 
     -- =================================================================
     -- SECTION 3: Confidential Grievance UPDATE Isolation
@@ -231,10 +292,18 @@ BEGIN
 
     -- Test 3.2c: Direct UPDATE on sensitive column assigned_proctor is rejected by column permissions
     BEGIN
-        UPDATE public.campus_cases SET assigned_proctor = v_proctor_x_id::text WHERE id = v_case_c_uuid;
+        UPDATE public.campus_cases SET assigned_proctor = 'Proctor Yolanda' WHERE id = v_case_c_uuid;
         RAISE EXCEPTION 'Test 3.2c Failed: Direct column UPDATE on assigned_proctor should have been denied!';
     EXCEPTION WHEN insufficient_privilege THEN
         RAISE NOTICE '[PASS] Test 3.2c: Direct column UPDATE on assigned_proctor strictly denied';
+    END;
+
+    -- Test 3.2d: Direct UPDATE on sensitive column assigned_proctor_user_id is rejected by column permissions
+    BEGIN
+        UPDATE public.campus_cases SET assigned_proctor_user_id = v_proctor_x_id WHERE id = v_case_c_uuid;
+        RAISE EXCEPTION 'Test 3.2d Failed: Direct column UPDATE on assigned_proctor_user_id should have been denied!';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE '[PASS] Test 3.2d: Direct column UPDATE on assigned_proctor_user_id strictly denied';
     END;
 
     -- Test 3.3: Assigned Proctor X CAN update notes on assigned confidential grievance (Case B)
@@ -265,7 +334,7 @@ BEGIN
     RAISE NOTICE '[PASS] Test 4.2: Suspended Proctor Sam denied all case access';
 
     -- =================================================================
-    -- SECTION 5: Confidential Audit-Log Isolation
+    -- SECTION 5: Confidential Audit-Log Isolation & Former Actor Hardening
     -- =================================================================
     -- Test 5.1: Unassigned Proctor X CANNOT read activity logs of confidential Case C
     EXECUTE 'SET LOCAL ROLE authenticated';
@@ -276,31 +345,48 @@ BEGIN
     ASSERT v_count = 0, 'Test 5.1 Failed: Unassigned Proctor X must NOT read confidential Case C activity logs!';
     RAISE NOTICE '[PASS] Test 5.1: Unassigned Proctor X denied activity logs of confidential grievance';
 
-    -- Test 5.2: Assigned Proctor X CAN read activity logs of assigned confidential Case B
-    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_b_uuid;
-    ASSERT v_count = 2, 'Test 5.2 Failed: Assigned Proctor X must see Case B activity logs (count: 2)!';
-    RAISE NOTICE '[PASS] Test 5.2: Assigned Proctor X views activity logs of assigned confidential grievance';
+    -- Test 5.2: Former Actor Self-Access Hardening:
+    -- Proctor Xavier actually created an activity log entry on Case C in the past (v_xavier_actor).
+    -- But Xavier is not currently assigned to Case C.
+    -- Verify that Xavier CANNOT read his own past log entry on Case C via audit_actor_id self-access!
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_c_uuid AND audit_actor_id = v_xavier_actor;
+    ASSERT v_count = 0, 'Test 5.2 Failed: Former actor Xavier must NOT read confidential Case C logs even though he authored an entry!';
+    RAISE NOTICE '[PASS] Test 5.2: Former actor self-access hardening verified: past authors blocked from confidential case logs';
 
-    -- Test 5.3: Committee member Carol CAN read activity logs of confidential Case C
+    -- Test 5.3: Assigned Proctor X CAN read activity logs of assigned confidential Case B
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_b_uuid;
+    ASSERT v_count = 2, 'Test 5.3 Failed: Assigned Proctor X must see Case B activity logs (count: 2)!';
+    RAISE NOTICE '[PASS] Test 5.3: Assigned Proctor X views activity logs of assigned confidential grievance';
+
+    -- Test 5.4: Case-assigned Committee member Carol CAN read activity logs of Case C
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_carol_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
     SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_c_uuid;
-    ASSERT v_count = 1, 'Test 5.3 Failed: Committee member Carol must see Case C activity logs!';
-    RAISE NOTICE '[PASS] Test 5.3: Committee member Carol views activity logs of confidential grievance';
+    ASSERT v_count >= 1, 'Test 5.4 Failed: Assigned Committee member Carol must see Case C activity logs!';
+    RAISE NOTICE '[PASS] Test 5.4: Case-assigned Committee member Carol views activity logs of Case C';
 
-    -- Test 5.4: Student Alice sees own audit activity via get_current_user_audit_actor_id()
+    -- Test 5.5: Unassigned Committee member Dave CANNOT read activity logs of Case C
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_dave_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_c_uuid;
+    ASSERT v_count = 0, 'Test 5.5 Failed: Unassigned Committee member Dave must NOT see Case C activity logs!';
+    RAISE NOTICE '[PASS] Test 5.5: Unassigned Committee member Dave denied activity logs of Case C';
+
+    -- Test 5.6: Student Alice sees own audit activity on Case A via get_current_user_audit_actor_id()
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_student_a_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
     SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_a_uuid;
-    ASSERT v_count = 1, 'Test 5.4 Failed: Student Alice must see her own activity log entry!';
-    RAISE NOTICE '[PASS] Test 5.4: Student Alice views own activity logs via get_current_user_audit_actor_id()';
+    ASSERT v_count = 1, 'Test 5.6 Failed: Student Alice must see her own activity log entry!';
+    RAISE NOTICE '[PASS] Test 5.6: Student Alice views own activity logs via get_current_user_audit_actor_id()';
 
     -- =================================================================
-    -- SECTION 6: Storage Objects Confidentiality Gating
+    -- SECTION 6: Storage Objects Confidentiality Gating & Revocation
     -- =================================================================
     -- Test 6.1: Student A views own document
     SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-STD-A/alice_doc.pdf';
@@ -312,7 +398,7 @@ BEGIN
     ASSERT v_count = 0, 'Test 6.2 Failed: Student A must NOT view Student B document';
     RAISE NOTICE '[PASS] Test 6.2: Student A denied access to Student B document';
 
-    -- Test 6.3: Unassigned Proctor X blocked from unassigned confidential document
+    -- Test 6.3: Unassigned Proctor X blocked from unassigned confidential document (Case C)
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_x_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
@@ -321,26 +407,60 @@ BEGIN
     ASSERT v_count = 0, 'Test 6.3 Failed: Unassigned Proctor X must NOT access confidential document';
     RAISE NOTICE '[PASS] Test 6.3: Unassigned Proctor X BLOCKED from confidential document';
 
-    -- Test 6.4: Assigned Proctor X accesses assigned confidential document
+    -- Test 6.4: Assigned Proctor X accesses assigned confidential document (Case B)
     SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-B/bob_assigned.pdf';
     ASSERT v_count = 1, 'Test 6.4 Failed: Assigned Proctor X must access assigned document';
     RAISE NOTICE '[PASS] Test 6.4: Assigned Proctor X accesses assigned confidential document';
 
-    -- Test 6.5: Direct anonymous access to storage.objects is strictly 0 rows
+    -- Test 6.5: Case-assigned Committee member Carol accesses Case C document
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_carol_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-C/bob_unassigned.pdf';
+    ASSERT v_count = 1, 'Test 6.5 Failed: Case-assigned Committee Carol must access Case C document';
+    RAISE NOTICE '[PASS] Test 6.5: Case-assigned Committee Carol accesses Case C document';
+
+    -- Test 6.6: Unassigned Committee member Dave CANNOT access Case C document
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_dave_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-C/bob_unassigned.pdf';
+    ASSERT v_count = 0, 'Test 6.6 Failed: Unassigned Committee member Dave must NOT access Case C document';
+    RAISE NOTICE '[PASS] Test 6.6: Unassigned Committee member Dave BLOCKED from Case C document';
+
+    -- Test 6.7: Revocation of Committee Assignment removes document and case access immediately
+    EXECUTE 'SET LOCAL ROLE postgres';
+    UPDATE public.case_committee_assignments SET assignment_status = 'revoked' WHERE user_id = v_carol_id;
+
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_carol_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-C/bob_unassigned.pdf';
+    ASSERT v_count = 0, 'Test 6.7 Failed: Revoked Committee Carol must NOT access Case C document';
+    RAISE NOTICE '[PASS] Test 6.7a: Revoked committee member Carol immediately loses document access';
+
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_c_uuid;
+    ASSERT v_count = 0, 'Test 6.7b Failed: Revoked Committee Carol must NOT see Case C';
+    RAISE NOTICE '[PASS] Test 6.7b: Revoked committee member Carol immediately loses case metadata access';
+
+    -- Test 6.8: Direct anonymous access to storage.objects is strictly 0 rows
     EXECUTE 'SET LOCAL ROLE anon';
     SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents';
-    ASSERT v_count = 0, 'Test 6.5 Failed: Anonymous role must see 0 objects';
-    RAISE NOTICE '[PASS] Test 6.5: Direct anonymous access on storage.objects is strictly 0 rows';
+    ASSERT v_count = 0, 'Test 6.8 Failed: Anonymous role must see 0 objects';
+    RAISE NOTICE '[PASS] Test 6.8: Direct anonymous access on storage.objects is strictly 0 rows';
 
-    -- Test 6.6: Institutional officer uploader CANNOT retain access to uploaded document after membership revocation
+    -- Test 6.9: Institutional officer uploader CANNOT retain access to uploaded document after membership revocation
     -- Setup: Yolanda is an active proctor in College Y who uploaded yolanda_doc.pdf
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_y_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
     SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-INST-Y/yolanda_doc.pdf';
-    ASSERT v_count = 1, 'Test 6.6 Setup Failed: Active officer Yolanda should view uploaded document';
-    RAISE NOTICE '[PASS] Test 6.6a: Active officer Yolanda accesses uploaded document in College Y';
+    ASSERT v_count = 1, 'Test 6.9 Setup Failed: Active officer Yolanda should view uploaded document';
+    RAISE NOTICE '[PASS] Test 6.9a: Active officer Yolanda accesses uploaded document in College Y';
 
     -- Now revoke/suspend Yolanda membership
     EXECUTE 'SET LOCAL ROLE postgres';
@@ -352,12 +472,12 @@ BEGIN
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
     SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-INST-Y/yolanda_doc.pdf';
-    ASSERT v_count = 0, 'Test 6.6 Failed: Suspended officer Yolanda must NOT access document even though she is the uploader!';
-    RAISE NOTICE '[PASS] Test 6.6b: Revoked/suspended officer Yolanda immediately loses document access despite being uploader/owner';
+    ASSERT v_count = 0, 'Test 6.9 Failed: Suspended officer Yolanda must NOT access document even though she is the uploader!';
+    RAISE NOTICE '[PASS] Test 6.9b: Revoked/suspended officer Yolanda immediately loses document access despite being uploader/owner';
 
     SELECT count(*) INTO v_count FROM public.case_documents WHERE storage_path = 'CAMPUS-INST-Y/yolanda_doc.pdf';
-    ASSERT v_count = 0, 'Test 6.6c Failed: Suspended officer Yolanda must NOT view case_documents row';
-    RAISE NOTICE '[PASS] Test 6.6c: Revoked/suspended officer Yolanda loses case_documents metadata access';
+    ASSERT v_count = 0, 'Test 6.9c Failed: Suspended officer Yolanda must NOT view case_documents row';
+    RAISE NOTICE '[PASS] Test 6.9c: Revoked/suspended officer Yolanda loses case_documents metadata access';
 
     -- =================================================================
     -- SECTION 7: Audit Immutability & Privileged RPC Protection
@@ -385,21 +505,24 @@ BEGIN
         RAISE NOTICE '[PASS] Test 7.2: Authenticated execution of status RPC strictly denied';
     END;
 
-    -- Test 7.3: Backend service_role executes privileged status update
+    -- Test 7.3: Backend service_role executes privileged status update with assigned_proctor_user_id
     EXECUTE 'SET LOCAL ROLE service_role';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''service_role''';
     
     SELECT public.update_campus_grievance_status(
         p_case_id => 'CAMPUS-STD-A',
         p_new_status => 'UNDER_INQUIRY',
-        p_proctor_notes => 'Inquiry initiated by authorized proctor'
+        p_proctor_notes => 'Inquiry initiated by authorized proctor',
+        p_assigned_proctor => 'Proctor Xavier',
+        p_assigned_proctor_user_id => v_proctor_x_id
     ) INTO v_rpc_res;
     
     ASSERT (v_rpc_res->>'status') = 'UNDER_INQUIRY', 'Test 7.3 Failed: service_role status update failed';
-    RAISE NOTICE '[PASS] Test 7.3: Authorized backend service_role updates status via RPC';
+    ASSERT (v_rpc_res->>'assigned_proctor_user_id') = v_proctor_x_id::text, 'Test 7.3 Failed: assigned_proctor_user_id was not set';
+    RAISE NOTICE '[PASS] Test 7.3: Authorized backend service_role updates status and assigns proctor via RPC';
 
     RAISE NOTICE '======================================================================';
-    RAISE NOTICE '  ALL NYAYPATH PHASE 1.3.12 RUNTIME SECURITY & CONFIDENTIALITY TESTS PASSED!';
+    RAISE NOTICE '  ALL NYAYPATH PHASE 1.3.13 RUNTIME SECURITY & CONFIDENTIALITY TESTS PASSED!';
     RAISE NOTICE '======================================================================';
 END $$;
 
