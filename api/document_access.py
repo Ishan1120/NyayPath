@@ -348,6 +348,9 @@ class DocumentAccessManager:
                 res = self.supabase.table("cases").select("*").eq("case_id", case_id).execute()
                 if res.data and len(res.data) > 0:
                     return res.data[0]
+                return None
+            except HTTPException:
+                raise
             except Exception as e:
                 logger.warning(f"Error fetching case from Supabase: {e}")
                 if is_production_environment():
