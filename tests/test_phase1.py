@@ -704,10 +704,20 @@ assert retry_after > 0, (
 )
 print(f"  [PASS] Rate limiter fails secure: DENY with retry_after={retry_after}s when storage unavailable.")
 
+def get_migration_sql(name_pattern: str) -> str:
+    canonical_dir = ROOT_DIR / "supabase" / "migrations"
+    if canonical_dir.exists():
+        matches = list(canonical_dir.glob(f"*{name_pattern}*"))
+        if matches:
+            return matches[0].read_text(encoding="utf-8")
+    fallback_dir = ROOT_DIR / "migrations"
+    matches = list(fallback_dir.glob(f"*{name_pattern}*"))
+    if matches:
+        return matches[0].read_text(encoding="utf-8")
+    raise FileNotFoundError(f"Migration matching {name_pattern} not found")
+
 print("[Test 13.2] Migration 003 SQL file exists and removes permissive policy")
-migration_path = ROOT_DIR / "migrations" / "003_rate_limit_security_fix.sql"
-assert migration_path.exists(), "migrations/003_rate_limit_security_fix.sql not found"
-migration_sql = migration_path.read_text(encoding="utf-8")
+migration_sql = get_migration_sql("rate_limit_security_fix.sql")
 assert "DROP POLICY IF EXISTS" in migration_sql, (
     "Migration 003 must DROP the overly permissive rate_limit policy"
 )
@@ -892,7 +902,7 @@ assert rate_limit_locked, "Failed: Rate limiter failure did not trigger fail-sec
 print("  [PASS] [Unit] Rate-limiter failure securely triggers HTTP 429 with Retry-After: 60s.")
 
 print("[Test 14.7] [Static SQL Inspection] Security-Definer execution permissions in Migration 003")
-mig_003_sql = (ROOT_DIR / "migrations" / "003_rate_limit_security_fix.sql").read_text(encoding="utf-8")
+mig_003_sql = get_migration_sql("rate_limit_security_fix.sql")
 assert "CREATE SCHEMA IF NOT EXISTS private;" in mig_003_sql, (
     "Migration 003 must create the unexposed 'private' schema"
 )
@@ -1001,7 +1011,7 @@ assert verify_tracking_credential(test_cred_v1, hash_v1, key_version="v2") is Fa
 print("  [PASS] [Unit] Key versioning strategy verified: historical records verifiable under respective key versions.")
 
 print("[Test 15.3] [Static SQL Inspection] Legacy tracking RPC permissions revoked in Migration 003")
-mig_003_text = (ROOT_DIR / "migrations" / "003_rate_limit_security_fix.sql").read_text(encoding="utf-8")
+mig_003_text = get_migration_sql("rate_limit_security_fix.sql")
 assert "DROP FUNCTION IF EXISTS public.verify_student_grievance_access(TEXT, TEXT);" in mig_003_text, (
     "Migration 003 must DROP public.verify_student_grievance_access"
 )
@@ -1026,7 +1036,7 @@ assert "REVOKE EXECUTE ON FUNCTION private.cleanup_stale_rate_limits() FROM PUBL
 print("  [PASS] [Static SQL Inspection] Rate limit maintenance function strictly isolated to private schema.")
 
 print("[Test 15.5] [Static SQL Inspection] Database-Backed Platform Admin Authorization in Migration 004")
-mig_004_text = (ROOT_DIR / "migrations" / "004_core_platform_schema.sql").read_text(encoding="utf-8")
+mig_004_text = get_migration_sql("core_platform_schema.sql")
 assert "CREATE TABLE IF NOT EXISTS public.platform_admins" in mig_004_text, (
     "Migration 004 must define public.platform_admins table"
 )
@@ -1106,7 +1116,7 @@ print("  [PASS] [Static SQL Inspection] Migration 004 defines all 7 required cor
 print("\n--- SECTION 16: DATABASE SECURITY & ARCHITECTURE REMEDIATION [Phase 1.3.5] ---")
 
 print("[Test 16.1] [Static SQL Inspection] Direct anonymous INSERT revoked on campus_cases (Task 1)")
-mig_003_sql = (ROOT_DIR / "migrations" / "003_rate_limit_security_fix.sql").read_text(encoding="utf-8")
+mig_003_sql = get_migration_sql("rate_limit_security_fix.sql")
 assert "REVOKE INSERT ON public.campus_cases FROM PUBLIC;" in mig_003_sql, (
     "Migration 003 must revoke INSERT on public.campus_cases from PUBLIC"
 )
@@ -1122,7 +1132,7 @@ assert "DROP POLICY IF EXISTS \"Allow grievance intake submission\" ON public.ca
 print("  [PASS] [Static SQL Inspection] Direct anonymous table INSERT strictly revoked on campus_cases.")
 
 print("[Test 16.2] [Static SQL Inspection] Audit log authenticity & immutability protection (Task 2)")
-mig_004_sql = (ROOT_DIR / "migrations" / "004_core_platform_schema.sql").read_text(encoding="utf-8")
+mig_004_sql = get_migration_sql("core_platform_schema.sql")
 assert "REVOKE ALL PRIVILEGES ON public.case_activity_log FROM PUBLIC, anon, authenticated;" in mig_004_sql, (
     "Migration 004 must revoke all privileges on case_activity_log before selective grants"
 )
@@ -1256,7 +1266,7 @@ assert re_fetched["internal_uuid"] == original_uuid, (
 print("  [PASS] [Unit/Regression] Case internal UUID is strictly immutable across updates; spoofed UUIDs rejected.")
 
 print("[Test 17.2] [Static SQL Inspection] Enforceable Foreign Keys linking campus_cases to parent cases (Task 1 & 3)")
-mig_004_sql = (ROOT_DIR / "migrations" / "004_core_platform_schema.sql").read_text(encoding="utf-8")
+mig_004_sql = get_migration_sql("core_platform_schema.sql")
 assert "fk_campus_cases_parent" in mig_004_sql, (
     "Migration 004 must define foreign key constraint 'fk_campus_cases_parent'"
 )
@@ -1353,7 +1363,7 @@ print("  [PASS] [Static DDL Audit] End-to-end SQL migration sequence validated w
 print("\n--- SECTION 18: AUTHORITATIVE PARENT CASE & ZERO SEED AUDIT [Phase 1.3.7] ---")
 
 print("[Test 18.1] [Static SQL Inspection] Authoritative Parent-to-Child Status Sync Trigger (Task 1)")
-mig_004_sql = (ROOT_DIR / "migrations" / "004_core_platform_schema.sql").read_text(encoding="utf-8")
+mig_004_sql = get_migration_sql("core_platform_schema.sql")
 assert "CREATE TRIGGER trg_sync_parent_case_update" in mig_004_sql, (
     "Migration 004 must attach trg_sync_parent_case_update trigger on public.cases"
 )

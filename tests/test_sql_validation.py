@@ -7,14 +7,14 @@ import re
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-MIGRATIONS_DIR = ROOT_DIR / "migrations"
+MIGRATIONS_DIR = ROOT_DIR / "supabase" / "migrations"
 
 def validate_all_migrations():
     migration_files = [
-        "001_create_campus_cases.sql",
-        "002_security_remediation.sql",
-        "003_rate_limit_security_fix.sql",
-        "004_core_platform_schema.sql"
+        "20261031000001_create_campus_cases.sql",
+        "20261031000002_security_remediation.sql",
+        "20261031000003_rate_limit_security_fix.sql",
+        "20261031000004_core_platform_schema.sql"
     ]
 
     print("=" * 70)
