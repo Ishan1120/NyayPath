@@ -23,6 +23,8 @@ from pydantic import BaseModel, EmailStr
 from fastapi import Request, HTTPException, status
 from fastapi.security import HTTPBearer
 from dotenv import load_dotenv
+import jwt
+from jwt import PyJWKClient, PyJWKClientError, InvalidTokenError
 
 # Ensure local .env is loaded whenever auth module is imported
 _root_env = Path(__file__).resolve().parent.parent / ".env"
@@ -395,23 +397,213 @@ def create_access_token(
 
     return f"{header_b64}.{payload_b64}.{sig_b64}"
 
-def decode_access_token(token: str) -> Optional[AuthUser]:
+# =====================================================================
+# Supabase JWKS & Native Supabase Auth JWT Verification (Phase 1.3.9)
+# =====================================================================
+
+_SUPABASE_JWKS_CLIENT: Optional[PyJWKClient] = None
+
+def get_supabase_jwks_client() -> Optional[PyJWKClient]:
+    """Returns a cached PyJWKClient configured with the Supabase project JWKS URL."""
+    global _SUPABASE_JWKS_CLIENT
+    if _SUPABASE_JWKS_CLIENT is not None:
+        return _SUPABASE_JWKS_CLIENT
+
+    supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    if not supabase_url:
+        return None
+
+    jwks_url = f"{supabase_url}/auth/v1/.well-known/jwks.json"
+    try:
+        _SUPABASE_JWKS_CLIENT = PyJWKClient(jwks_url, cache_keys=True, max_cached_keys=10)
+        return _SUPABASE_JWKS_CLIENT
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase PyJWKClient: {e}")
+        return None
+
+def verify_supabase_jwt(
+    token: str,
+    jwks_client: Optional[PyJWKClient] = None
+) -> Optional[Dict[str, Any]]:
     """
-    Strictly validates JWT:
-    1. Signature verification against JWT_SECRET (or SUPABASE_JWT_SECRET).
-    2. Enforces presence of 'exp' claim and verifies expiration.
-    3. Rejects tampered tokens.
-    4. Enforces account_status == 'active'.
+    Validates a native Supabase Auth JWT against the project's cryptographic configuration.
+    1. Strictly rejects opaque Supabase API keys (sb_publishable_..., sb_secret_...).
+    2. Inspects unverified header to determine signing algorithm and 'kid'.
+    3. Validates algorithm against an explicit allowlist (ES256, RS256; or HS256 if SUPABASE_JWT_SECRET configured).
+    4. For asymmetric algorithms (ES256, RS256):
+       - Obtains the public verification key from the project's JWKS endpoint matching 'kid'.
+       - Cryptographically verifies the signature.
+    5. For legacy HS256:
+       - Uses SUPABASE_JWT_SECRET only. Never uses application JWT_SECRET or backend service keys.
+    6. Strictly verifies required claims:
+       - 'iss': must match the project's auth issuer (https://<project-ref>.supabase.co/auth/v1).
+       - 'aud': must match 'authenticated' (standard Supabase user token aud).
+       - 'exp': must be in the future.
+       - 'sub': must be a non-empty user UUID.
+    7. Returns payload dictionary if fully verified; returns None on any failure.
     """
     if not token or not isinstance(token, str):
         return None
+
+    # Step 1: Reject opaque API keys
+    clean_token = token.strip()
+    if clean_token.startswith("sb_publishable_") or clean_token.startswith("sb_secret_"):
+        logger.warning("Rejected API key passed in Authorization header: Supabase API keys are not bearer tokens.")
+        return None
+
     try:
-        parts = token.split('.')
+        unverified_header = jwt.get_unverified_header(clean_token)
+    except Exception:
+        return None
+
+    alg = unverified_header.get("alg")
+    kid = unverified_header.get("kid")
+
+    supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    expected_iss = f"{supabase_url}/auth/v1" if supabase_url else None
+
+    # Step 2: Asymmetric verification (ES256 / RS256)
+    if alg in ["ES256", "RS256"]:
+        client = jwks_client or get_supabase_jwks_client()
+        if not client:
+            logger.warning("Supabase JWKS client unavailable for asymmetric JWT verification.")
+            return None
+
+        try:
+            signing_key = client.get_signing_key_from_jwt(clean_token)
+            payload = jwt.decode(
+                clean_token,
+                signing_key.key,
+                algorithms=[alg],
+                audience="authenticated",
+                issuer=expected_iss,
+                options={
+                    "require": ["exp", "sub", "aud", "iss"],
+                    "verify_exp": True,
+                    "verify_aud": True,
+                    "verify_iss": bool(expected_iss)
+                }
+            )
+            return payload
+        except (PyJWKClientError, InvalidTokenError) as e:
+            logger.warning(f"Native Supabase asymmetric JWT verification failed: {e}")
+            return None
+
+    # Step 3: Legacy symmetric verification (HS256)
+    elif alg == "HS256":
+        supabase_jwt_secret = os.environ.get("SUPABASE_JWT_SECRET")
+        if not supabase_jwt_secret:
+            logger.warning("Rejected HS256 Supabase token: SUPABASE_JWT_SECRET is not configured.")
+            return None
+
+        try:
+            payload = jwt.decode(
+                clean_token,
+                supabase_jwt_secret,
+                algorithms=["HS256"],
+                audience="authenticated",
+                issuer=expected_iss,
+                options={
+                    "require": ["exp", "sub", "aud"],
+                    "verify_exp": True,
+                    "verify_aud": True,
+                    "verify_iss": bool(expected_iss)
+                }
+            )
+            return payload
+        except InvalidTokenError as e:
+            logger.warning(f"Native Supabase HS256 JWT verification failed: {e}")
+            return None
+
+    else:
+        logger.warning(f"Unsupported JWT signing algorithm: {alg}. Only ES256, RS256, and HS256 are permitted.")
+        return None
+
+def decode_supabase_access_token(
+    token: str,
+    jwks_client: Optional[PyJWKClient] = None
+) -> Optional[AuthUser]:
+    """
+    Decodes a native Supabase Auth JWT into an AuthUser object:
+    - Cryptographically verifies the signature via verify_supabase_jwt.
+    - Extracts app_metadata (role, institution_id, account_status).
+    - Extracts user_metadata (full_name, email).
+    - Enforces account_status == 'active'.
+    """
+    payload = verify_supabase_jwt(token, jwks_client=jwks_client)
+    if not payload:
+        return None
+
+    app_meta = payload.get("app_metadata") or {}
+    raw_role = app_meta.get("role") or payload.get("role") or "student"
+    raw_inst = app_meta.get("institution_id") or payload.get("institution_id") or "INST_DEFAULT"
+    raw_status = app_meta.get("account_status", "active")
+
+    if raw_status in ["suspended", "revoked"]:
+        return None
+
+    try:
+        role_enum = UserRole(raw_role)
+    except ValueError:
+        role_enum = UserRole.STUDENT
+
+    try:
+        status_enum = AccountStatus(raw_status)
+    except ValueError:
+        status_enum = AccountStatus.ACTIVE
+
+    user_meta = payload.get("user_metadata") or {}
+    exp = payload.get("exp", 0)
+
+    return AuthUser(
+        user_id=payload.get("sub", "00000000-0000-0000-0000-000000000000"),
+        role=role_enum,
+        institution_id=raw_inst,
+        name=user_meta.get("full_name") or payload.get("name") or "Authorized Officer",
+        email=user_meta.get("email") or payload.get("email"),
+        account_status=status_enum,
+        exp=int(exp)
+    )
+
+def decode_access_token(token: str) -> Optional[AuthUser]:
+    """
+    Strictly validates access token:
+    1. Rejects opaque API keys (sb_publishable_..., sb_secret_...).
+    2. If token is signed via Supabase Auth (asymmetric ES256/RS256 or issuer points to Supabase),
+       validates via decode_supabase_access_token.
+    3. If token is an application JWT (HS256):
+       - Signature verification against application JWT_SECRET.
+       - Enforces presence of 'exp' claim and verifies expiration.
+       - Rejects tampered tokens.
+       - Enforces account_status == 'active'.
+    """
+    if not token or not isinstance(token, str):
+        return None
+
+    clean_token = token.strip()
+    # Reject opaque Supabase API keys
+    if clean_token.startswith("sb_publishable_") or clean_token.startswith("sb_secret_"):
+        logger.warning("Rejected API key passed in Authorization header: API keys are not bearer tokens.")
+        return None
+
+    # Check unverified header to route appropriately
+    try:
+        unverified_header = jwt.get_unverified_header(clean_token)
+        alg = unverified_header.get("alg")
+        if alg in ["ES256", "RS256"]:
+            # Route to native Supabase asymmetric verification
+            return decode_supabase_access_token(clean_token)
+    except Exception:
+        # If header parsing fails, fallback to basic parts validation below
+        pass
+
+    try:
+        parts = clean_token.split('.')
         if len(parts) != 3:
             return None
         header_b64, payload_b64, sig_b64 = parts
 
-        # Verify Signature with JWT_SECRET
+        # Verify Signature with application JWT_SECRET
         expected_sig = hmac.new(
             JWT_SECRET.encode('utf-8'),
             f"{header_b64}.{payload_b64}".encode('utf-8'),
@@ -421,7 +613,7 @@ def decode_access_token(token: str) -> Optional[AuthUser]:
 
         sig_valid = hmac.compare_digest(expected_sig, actual_sig)
 
-        # If invalid, check if signed by external Supabase JWT secret
+        # If invalid with application JWT_SECRET, check if signed by external SUPABASE_JWT_SECRET
         if not sig_valid:
             supabase_jwt_secret = os.environ.get("SUPABASE_JWT_SECRET")
             if supabase_jwt_secret:

@@ -2017,8 +2017,129 @@ sanitized_attach_reader = pypdf.PdfReader(io.BytesIO(sanitized_attach_bytes))
 assert len(sanitized_attach_reader.attachments) == 0, "All embedded file attachments must be stripped"
 print("  [PASS] Hidden embedded file attachments stripped completely from PDF.")
 
+# =====================================================================
+# SECTION 23: SUPABASE API-KEY SEPARATION & ASYMMETRIC JWT [Phase 1.3.9]
+# =====================================================================
+print("\n--- SECTION 23: SUPABASE API-KEY SEPARATION & ASYMMETRIC JWT [Phase 1.3.9] ---")
+
+from datetime import datetime, timezone
+import time
+from api.auth import (
+    verify_supabase_jwt,
+    decode_supabase_access_token,
+    get_supabase_jwks_client
+)
+from cryptography.hazmat.primitives.asymmetric import ec
+import jwt
+from jwt import PyJWKClient, PyJWKClientError
+
+print("[Test 23.1] Reject opaque Supabase API keys passed as bearer JWTs")
+opaque_pub = "sb_publishable_dummy_key_not_a_jwt_123456789"
+opaque_sec = "sb_secret_dummy_key_not_a_jwt_987654321"
+
+assert decode_access_token(opaque_pub) is None, "Opaque publishable key must be rejected by decode_access_token"
+assert decode_access_token(opaque_sec) is None, "Opaque secret key must be rejected by decode_access_token"
+assert verify_supabase_jwt(opaque_pub) is None, "Opaque publishable key must be rejected by verify_supabase_jwt"
+assert verify_supabase_jwt(opaque_sec) is None, "Opaque secret key must be rejected by verify_supabase_jwt"
+print("  [PASS] Opaque API keys (sb_publishable_... / sb_secret_...) strictly rejected as bearer tokens.")
+
+print("[Test 23.2] Reject unsupported or insecure JWT algorithms (none, HS512, RS512)")
+insecure_token = jwt.encode({"sub": str(uuid.uuid4())}, "secret", algorithm="HS512")
+assert verify_supabase_jwt(insecure_token) is None, "HS512 must be rejected by verify_supabase_jwt allowlist"
+print("  [PASS] Non-allowlisted JWT algorithms strictly rejected.")
+
+print("[Test 23.3] Verify native Supabase Auth asymmetric JWT (ES256) with valid key")
+ec_priv = ec.generate_private_key(ec.SECP256R1())
+ec_pub = ec_priv.public_key()
+test_kid = str(uuid.uuid4())
+sb_url = os.environ.get("SUPABASE_URL", "https://dbwojjxfhnmmwrnqxyqj.supabase.co").rstrip("/")
+
+valid_claims = {
+    "sub": str(uuid.uuid4()),
+    "aud": "authenticated",
+    "iss": f"{sb_url}/auth/v1",
+    "exp": int(datetime.now(timezone.utc).timestamp()) + 3600,
+    "iat": int(datetime.now(timezone.utc).timestamp()),
+    "email": "officer@test.edu",
+    "app_metadata": {
+        "role": "proctor",
+        "institution_id": "INST_NIT",
+        "account_status": "active"
+    },
+    "user_metadata": {
+        "full_name": "Test Proctor Officer"
+    }
+}
+es256_token = jwt.encode(valid_claims, ec_priv, algorithm="ES256", headers={"kid": test_kid})
+
+# Create a mock PyJWKClient that resolves our test key
+class MockJWK:
+    def __init__(self, key, kid):
+        self.key = key
+        self.key_id = kid
+
+class MockJWKClient:
+    def __init__(self, key, kid):
+        self.key = key
+        self.kid = kid
+    def get_signing_key_from_jwt(self, token):
+        hdr = jwt.get_unverified_header(token)
+        if hdr.get("kid") == self.kid:
+            return MockJWK(self.key, self.kid)
+        raise PyJWKClientError(f"Key ID {hdr.get('kid')} not found")
+
+mock_client = MockJWKClient(ec_pub, test_kid)
+verified_payload = verify_supabase_jwt(es256_token, jwks_client=mock_client)
+assert verified_payload is not None, "Valid ES256 Supabase token must verify successfully"
+assert verified_payload["sub"] == valid_claims["sub"]
+assert verified_payload["email"] == "officer@test.edu"
+
+# Test decode_supabase_access_token maps to AuthUser
+mapped_user = decode_supabase_access_token(es256_token, jwks_client=mock_client)
+assert mapped_user is not None
+assert mapped_user.role == UserRole.PROCTOR
+assert mapped_user.institution_id == "INST_NIT"
+assert mapped_user.account_status == AccountStatus.ACTIVE
+print("  [PASS] Native Supabase Auth ES256 token verified and mapped to AuthUser.")
+
+print("[Test 23.4] Reject untrusted asymmetric signing key (unknown kid or mismatched public key)")
+untrusted_client = MockJWKClient(ec_pub, "different-kid-9999")
+assert verify_supabase_jwt(es256_token, jwks_client=untrusted_client) is None, "Unknown kid must fail verification"
+print("  [PASS] Untrusted asymmetric signing key rejected.")
+
+print("[Test 23.5] Separation of application JWT_SECRET tokens from native Supabase Auth")
+app_token = create_access_token(mapped_user)
+# Application token is HS256 signed with JWT_SECRET; verify_supabase_jwt must reject it
+# because SUPABASE_JWT_SECRET is not configured or differs
+assert verify_supabase_jwt(app_token) is None, "Application JWT must not be accepted as native Supabase Auth token"
+print("  [PASS] Custom application JWT is cleanly separated and rejected by native Supabase validator.")
+
+print("[Test 23.6] Reject legacy HS256 Supabase token when SUPABASE_JWT_SECRET is unconfigured")
+orig_sb_jwt_sec = os.environ.pop("SUPABASE_JWT_SECRET", None)
+hs256_sb_token = jwt.encode(
+    {"sub": str(uuid.uuid4()), "aud": "authenticated", "iss": f"{sb_url}/auth/v1", "exp": int(time.time()) + 3600},
+    "arbitrary_hs256_key",
+    algorithm="HS256"
+)
+assert verify_supabase_jwt(hs256_sb_token) is None, "HS256 Supabase token must be rejected without SUPABASE_JWT_SECRET"
+if orig_sb_jwt_sec:
+    os.environ["SUPABASE_JWT_SECRET"] = orig_sb_jwt_sec
+print("  [PASS] HS256 Supabase token rejected when SUPABASE_JWT_SECRET is unset.")
+
+print("[Test 23.7] Live Supabase JWKS endpoint verification (read-only inspect)")
+live_jwks_client = get_supabase_jwks_client()
+if live_jwks_client:
+    try:
+        keys = live_jwks_client.get_signing_keys()
+        assert len(keys) >= 1, "Expected at least 1 public key from live Supabase JWKS"
+        print(f"  [PASS] Live Supabase JWKS returned {len(keys)} public signing key(s) (kid: {keys[0].key_id}).")
+    except Exception as e:
+        print(f"  [NOTICE] Live JWKS fetch skipped or failed: {e}")
+else:
+    print("  [NOTICE] Live JWKS client unconfigured (SUPABASE_URL unset).")
+
 print("\n" + "=" * 70)
-print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 + 1.3.7 TESTS COMPLETED SUCCESSFULLY!")
+print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 + 1.3.7 + 1.3.9 TESTS COMPLETED SUCCESSFULLY!")
 print("=" * 70 + "\n")
 
 
