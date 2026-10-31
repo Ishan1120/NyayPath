@@ -411,10 +411,10 @@ BEGIN
                   (v_child_inst_uuid IS NOT NULL AND im.institution_id = v_child_inst_uuid)
                   OR (v_child_inst_uuid IS NULL AND im.institution_code = v_child_inst_code)
               )
-              AND im.role IN ('proctor', 'chief_proctor', 'committee_member', 'institution_admin')
+              AND im.role IN ('proctor', 'chief_proctor')
               AND im.account_status = 'active'
         ) THEN
-            RAISE EXCEPTION 'Assigned proctor % lacks an active officer membership in institution %',
+            RAISE EXCEPTION 'Assigned proctor % lacks an active proctor membership in institution %',
                 v_resolved_proctor_uuid, v_child_inst_code;
         END IF;
     END IF;
@@ -701,15 +701,219 @@ ON public.case_committee_assignments FOR SELECT
 TO authenticated
 USING (
     private.is_platform_admin()
-    OR user_id = auth.uid()
+    OR (
+        user_id = auth.uid()
+        AND EXISTS (
+            SELECT 1 FROM public.institution_memberships im
+            WHERE im.user_id = auth.uid()
+              AND (
+                  case_committee_assignments.institution_uuid IS NULL 
+                  OR im.institution_id = case_committee_assignments.institution_uuid
+              )
+              AND im.account_status = 'active'
+        )
+    )
     OR EXISTS (
         SELECT 1 FROM public.institution_memberships im
         WHERE im.user_id = auth.uid()
-          AND im.institution_id = case_committee_assignments.institution_uuid
+          AND (
+              case_committee_assignments.institution_uuid IS NULL 
+              OR im.institution_id = case_committee_assignments.institution_uuid
+          )
           AND im.role IN ('institution_admin', 'chief_proctor')
           AND im.account_status = 'active'
     )
 );
+
+-- =====================================================================
+-- 8a.2 COMMITTEE ASSIGNMENT SECURITY DEFINER RPCs (Provisioning & Revocation)
+-- =====================================================================
+
+CREATE OR REPLACE FUNCTION public.assign_case_committee_member(
+    p_case_id VARCHAR(64),
+    p_target_user_id UUID,
+    p_role VARCHAR(32) DEFAULT 'member',
+    p_committee_name TEXT DEFAULT NULL,
+    p_assigned_by UUID DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_case_uuid UUID;
+    v_inst_uuid UUID;
+    v_inst_code TEXT;
+    v_case_type TEXT;
+    v_assigner_uuid UUID;
+    v_assignment_id UUID;
+    v_res JSONB;
+BEGIN
+    v_assigner_uuid := COALESCE(p_assigned_by, auth.uid());
+
+    -- 1. Locate case and lock row
+    SELECT c.id, c.case_type, cc.institution_uuid, cc.institution_id
+    INTO v_case_uuid, v_case_type, v_inst_uuid, v_inst_code
+    FROM public.cases c
+    JOIN public.campus_cases cc ON cc.id = c.id
+    WHERE c.case_id = p_case_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Case % not found', p_case_id;
+    END IF;
+
+    IF v_case_type <> 'CAMPUS_GRIEVANCE' THEN
+        RAISE EXCEPTION 'Case % is not a campus grievance', p_case_id;
+    END IF;
+
+    -- 2. Verify assigner authorization
+    IF v_assigner_uuid IS NOT NULL THEN
+        IF NOT private.is_platform_admin() THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM public.institution_memberships im
+                WHERE im.user_id = v_assigner_uuid
+                  AND (
+                      (v_inst_uuid IS NOT NULL AND im.institution_id = v_inst_uuid)
+                      OR (v_inst_uuid IS NULL AND im.institution_code = v_inst_code)
+                  )
+                  AND im.role IN ('institution_admin', 'chief_proctor')
+                  AND im.account_status = 'active'
+            ) THEN
+                RAISE EXCEPTION 'User % is not authorized to provision committee assignments for institution %',
+                    v_assigner_uuid, COALESCE(v_inst_code, v_inst_uuid::text);
+            END IF;
+        END IF;
+    END IF;
+
+    -- 3. Verify target user has active committee membership in the SAME institution
+    IF NOT EXISTS (
+        SELECT 1 FROM public.institution_memberships im
+        WHERE im.user_id = p_target_user_id
+          AND (
+              (v_inst_uuid IS NOT NULL AND im.institution_id = v_inst_uuid)
+              OR (v_inst_uuid IS NULL AND im.institution_code = v_inst_code)
+          )
+          AND im.role IN ('committee_member', 'institution_admin', 'chief_proctor')
+          AND im.account_status = 'active'
+    ) THEN
+        RAISE EXCEPTION 'Target user % lacks an active committee membership in institution %',
+            p_target_user_id, COALESCE(v_inst_code, v_inst_uuid::text);
+    END IF;
+
+    -- 4. Upsert assignment
+    INSERT INTO public.case_committee_assignments (
+        case_uuid, case_id, user_id, institution_uuid,
+        committee_name, role, assignment_status, assigned_by, assigned_at, revoked_at
+    ) VALUES (
+        v_case_uuid, p_case_id, p_target_user_id, v_inst_uuid,
+        p_committee_name, COALESCE(p_role, 'member'), 'active', v_assigner_uuid, timezone('utc'::text, now()), NULL
+    )
+    ON CONFLICT (case_uuid, user_id) DO UPDATE SET
+        assignment_status = 'active',
+        role = EXCLUDED.role,
+        committee_name = COALESCE(EXCLUDED.committee_name, case_committee_assignments.committee_name),
+        institution_uuid = v_inst_uuid,
+        assigned_by = v_assigner_uuid,
+        assigned_at = timezone('utc'::text, now()),
+        revoked_at = NULL
+    RETURNING id INTO v_assignment_id;
+
+    SELECT jsonb_build_object(
+        'assignment_id', cca.id,
+        'case_id', cca.case_id,
+        'case_uuid', cca.case_uuid,
+        'user_id', cca.user_id,
+        'institution_uuid', cca.institution_uuid,
+        'committee_name', cca.committee_name,
+        'role', cca.role,
+        'assignment_status', cca.assignment_status,
+        'assigned_at', cca.assigned_at
+    ) INTO v_res
+    FROM public.case_committee_assignments cca
+    WHERE cca.id = v_assignment_id;
+
+    RETURN v_res;
+END;
+$$;
+
+REVOKE ALL PRIVILEGES ON FUNCTION public.assign_case_committee_member(VARCHAR(64), UUID, VARCHAR(32), TEXT, UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.assign_case_committee_member(VARCHAR(64), UUID, VARCHAR(32), TEXT, UUID) TO service_role;
+
+CREATE OR REPLACE FUNCTION public.revoke_case_committee_assignment(
+    p_case_id VARCHAR(64),
+    p_target_user_id UUID,
+    p_revoked_by UUID DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_case_uuid UUID;
+    v_inst_uuid UUID;
+    v_inst_code TEXT;
+    v_revoker_uuid UUID;
+    v_res JSONB;
+BEGIN
+    v_revoker_uuid := COALESCE(p_revoked_by, auth.uid());
+
+    SELECT c.id, cc.institution_uuid, cc.institution_id
+    INTO v_case_uuid, v_inst_uuid, v_inst_code
+    FROM public.cases c
+    JOIN public.campus_cases cc ON cc.id = c.id
+    WHERE c.case_id = p_case_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Case % not found', p_case_id;
+    END IF;
+
+    IF v_revoker_uuid IS NOT NULL THEN
+        IF NOT private.is_platform_admin() THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM public.institution_memberships im
+                WHERE im.user_id = v_revoker_uuid
+                  AND (
+                      (v_inst_uuid IS NOT NULL AND im.institution_id = v_inst_uuid)
+                      OR (v_inst_uuid IS NULL AND im.institution_code = v_inst_code)
+                  )
+                  AND im.role IN ('institution_admin', 'chief_proctor')
+                  AND im.account_status = 'active'
+            ) THEN
+                RAISE EXCEPTION 'User % is not authorized to revoke committee assignments for institution %',
+                    v_revoker_uuid, COALESCE(v_inst_code, v_inst_uuid::text);
+            END IF;
+        END IF;
+    END IF;
+
+    UPDATE public.case_committee_assignments
+    SET
+        assignment_status = 'revoked',
+        revoked_at = timezone('utc'::text, now())
+    WHERE case_uuid = v_case_uuid
+      AND user_id = p_target_user_id
+    RETURNING jsonb_build_object(
+        'assignment_id', id,
+        'case_id', case_id,
+        'case_uuid', case_uuid,
+        'user_id', user_id,
+        'assignment_status', assignment_status,
+        'revoked_at', revoked_at
+    ) INTO v_res;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Active committee assignment not found for case % and user %', p_case_id, p_target_user_id;
+    END IF;
+
+    RETURN v_res;
+END;
+$$;
+
+REVOKE ALL PRIVILEGES ON FUNCTION public.revoke_case_committee_assignment(VARCHAR(64), UUID, UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.revoke_case_committee_assignment(VARCHAR(64), UUID, UUID) TO service_role;
 
 -- =====================================================================
 -- 8b. AUTHORITATIVE CAMPUS_CASES RLS POLICIES (Institutional Scoping & Confidentiality Gating)
@@ -732,15 +936,34 @@ USING (
         AND (
             -- Standard/non-confidential grievances viewable for institutional triage
             confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
-            -- Directly assigned proctor (strictly verified via authenticated user UUID; never mutable display names)
-            OR assigned_proctor_user_id = auth.uid()
-            OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text)
-            -- Case-specific committee assignment (verified via user UUID and active assignment status)
+            -- Directly assigned proctor (strictly verified via authenticated user UUID; requires active proctor/chief_proctor/admin role)
+            OR (
+                (assigned_proctor_user_id = auth.uid() OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text))
+                AND EXISTS (
+                    SELECT 1 FROM public.institution_memberships im
+                    WHERE im.user_id = auth.uid()
+                      AND (
+                          (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                          OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                      )
+                      AND im.account_status = 'active'
+                      AND im.role IN ('proctor', 'chief_proctor', 'institution_admin')
+                )
+            )
+            -- Case-specific committee assignment (strictly requires active committee_member or institution_admin role in the same institution)
             OR EXISTS (
                 SELECT 1 FROM public.case_committee_assignments cca
+                JOIN public.institution_memberships im 
+                  ON im.user_id = cca.user_id
+                 AND (
+                     (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                     OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                 )
                 WHERE cca.case_uuid = campus_cases.id
                   AND cca.user_id = auth.uid()
                   AND cca.assignment_status = 'active'
+                  AND im.account_status = 'active'
+                  AND im.role IN ('committee_member', 'institution_admin')
             )
             -- Institution admin institutional oversight
             OR EXISTS (
@@ -767,13 +990,32 @@ USING (
         private.can_officer_access_case(institution_uuid, institution_id)
         AND (
             confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
-            OR assigned_proctor_user_id = auth.uid()
-            OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text)
+            OR (
+                (assigned_proctor_user_id = auth.uid() OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text))
+                AND EXISTS (
+                    SELECT 1 FROM public.institution_memberships im
+                    WHERE im.user_id = auth.uid()
+                      AND (
+                          (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                          OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                      )
+                      AND im.account_status = 'active'
+                      AND im.role IN ('proctor', 'chief_proctor', 'institution_admin')
+                )
+            )
             OR EXISTS (
                 SELECT 1 FROM public.case_committee_assignments cca
+                JOIN public.institution_memberships im 
+                  ON im.user_id = cca.user_id
+                 AND (
+                     (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                     OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                 )
                 WHERE cca.case_uuid = campus_cases.id
                   AND cca.user_id = auth.uid()
                   AND cca.assignment_status = 'active'
+                  AND im.account_status = 'active'
+                  AND im.role IN ('committee_member', 'institution_admin')
             )
             OR EXISTS (
                 SELECT 1 FROM public.institution_memberships im
@@ -782,7 +1024,7 @@ USING (
                       (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
                       OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
                   )
-                  AND im.role = 'institution_admin'
+                  AND im.role IN ('institution_admin', 'chief_proctor')
                   AND im.account_status = 'active'
             )
         )
@@ -794,13 +1036,32 @@ WITH CHECK (
         private.can_officer_access_case(institution_uuid, institution_id)
         AND (
             confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
-            OR assigned_proctor_user_id = auth.uid()
-            OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text)
+            OR (
+                (assigned_proctor_user_id = auth.uid() OR (assigned_proctor_user_id IS NULL AND assigned_proctor = auth.uid()::text))
+                AND EXISTS (
+                    SELECT 1 FROM public.institution_memberships im
+                    WHERE im.user_id = auth.uid()
+                      AND (
+                          (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                          OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                      )
+                      AND im.account_status = 'active'
+                      AND im.role IN ('proctor', 'chief_proctor', 'institution_admin')
+                )
+            )
             OR EXISTS (
                 SELECT 1 FROM public.case_committee_assignments cca
+                JOIN public.institution_memberships im 
+                  ON im.user_id = cca.user_id
+                 AND (
+                     (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                     OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                 )
                 WHERE cca.case_uuid = campus_cases.id
                   AND cca.user_id = auth.uid()
                   AND cca.assignment_status = 'active'
+                  AND im.account_status = 'active'
+                  AND im.role IN ('committee_member', 'institution_admin')
             )
             OR EXISTS (
                 SELECT 1 FROM public.institution_memberships im
@@ -809,7 +1070,7 @@ WITH CHECK (
                       (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
                       OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
                   )
-                  AND im.role = 'institution_admin'
+                  AND im.role IN ('institution_admin', 'chief_proctor')
                   AND im.account_status = 'active'
             )
         )
@@ -929,13 +1190,32 @@ CREATE POLICY "Authorized users view case documents"
               AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
               AND (
                   (cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL') AND case_documents.is_confidential IS NOT TRUE)
-                  OR cc.assigned_proctor_user_id = auth.uid()
-                  OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text)
+                  OR (
+                      (cc.assigned_proctor_user_id = auth.uid() OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text))
+                      AND EXISTS (
+                          SELECT 1 FROM public.institution_memberships im
+                          WHERE im.user_id = auth.uid()
+                            AND (
+                                (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
+                                OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
+                            )
+                            AND im.account_status = 'active'
+                            AND im.role IN ('proctor', 'chief_proctor', 'institution_admin')
+                      )
+                  )
                   OR EXISTS (
                       SELECT 1 FROM public.case_committee_assignments cca
+                      JOIN public.institution_memberships im 
+                        ON im.user_id = cca.user_id
+                       AND (
+                           (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
+                           OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
+                       )
                       WHERE cca.case_uuid = cc.id
                         AND cca.user_id = auth.uid()
                         AND cca.assignment_status = 'active'
+                        AND im.account_status = 'active'
+                        AND im.role IN ('committee_member', 'institution_admin')
                   )
                   OR EXISTS (
                       SELECT 1 FROM public.institution_memberships im
@@ -1056,13 +1336,32 @@ CREATE POLICY "Officers and users can view authorized activity logs"
                       cc.confidentiality_mode IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
                       AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
                       AND (
-                          cc.assigned_proctor_user_id = auth.uid()
-                          OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text)
+                          (
+                              (cc.assigned_proctor_user_id = auth.uid() OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text))
+                              AND EXISTS (
+                                  SELECT 1 FROM public.institution_memberships im
+                                  WHERE im.user_id = auth.uid()
+                                    AND (
+                                        (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
+                                        OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
+                                    )
+                                    AND im.account_status = 'active'
+                                    AND im.role IN ('proctor', 'chief_proctor', 'institution_admin')
+                              )
+                          )
                           OR EXISTS (
                               SELECT 1 FROM public.case_committee_assignments cca
+                              JOIN public.institution_memberships im 
+                                ON im.user_id = cca.user_id
+                               AND (
+                                   (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
+                                   OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
+                               )
                               WHERE cca.case_uuid = cc.id
                                 AND cca.user_id = auth.uid()
                                 AND cca.assignment_status = 'active'
+                                AND im.account_status = 'active'
+                                AND im.role IN ('committee_member', 'institution_admin')
                           )
                           OR EXISTS (
                               SELECT 1 FROM public.institution_memberships im
@@ -1217,13 +1516,32 @@ BEGIN
                           AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
                           AND (
                               (cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL') AND cd.is_confidential IS NOT TRUE)
-                              OR cc.assigned_proctor_user_id = auth.uid()
-                              OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text)
+                              OR (
+                                  (cc.assigned_proctor_user_id = auth.uid() OR (cc.assigned_proctor_user_id IS NULL AND cc.assigned_proctor = auth.uid()::text))
+                                  AND EXISTS (
+                                      SELECT 1 FROM public.institution_memberships im
+                                      WHERE im.user_id = auth.uid()
+                                        AND (
+                                            (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
+                                            OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
+                                        )
+                                        AND im.account_status = 'active'
+                                        AND im.role IN ('proctor', 'chief_proctor', 'institution_admin')
+                                  )
+                              )
                               OR EXISTS (
                                   SELECT 1 FROM public.case_committee_assignments cca
+                                  JOIN public.institution_memberships im 
+                                    ON im.user_id = cca.user_id
+                                   AND (
+                                       (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
+                                       OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
+                                   )
                                   WHERE cca.case_uuid = cc.id
                                     AND cca.user_id = auth.uid()
                                     AND cca.assignment_status = 'active'
+                                    AND im.account_status = 'active'
+                                    AND im.role IN ('committee_member', 'institution_admin')
                               )
                               OR EXISTS (
                                   SELECT 1 FROM public.institution_memberships im

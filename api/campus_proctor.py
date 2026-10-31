@@ -69,7 +69,7 @@ class StudentGrievanceSubmit(BaseModel):
     description: str
     incident_date: Optional[str] = None
     is_anonymous: Optional[bool] = False
-    confidentiality_mode: Optional[str] = "CONFIDENTIAL"
+    confidentiality_mode: Optional[str] = "NORMAL"
     supporting_documents: Optional[List[Dict[str, Any]]] = []
 
 class ProctorUpdateStatus(BaseModel):
@@ -86,6 +86,16 @@ class ProctorUpdateStatus(BaseModel):
 class StudentTrackingRequest(BaseModel):
     case_id: str
     verification_key: str
+
+class CaseCommitteeAssignRequest(BaseModel):
+    case_id: str
+    target_user_id: str
+    role: Optional[str] = "member"
+    committee_name: Optional[str] = None
+
+class CaseCommitteeRevokeRequest(BaseModel):
+    case_id: str
+    target_user_id: str
 
 # Permitted state machine transitions for campus grievances (Task 2 & 4)
 PERMITTED_STATUS_TRANSITIONS: Dict[str, set] = {
@@ -546,6 +556,47 @@ class CampusProctorManager:
             except Exception as e:
                 logger.warning(f"institution_memberships lookup exception (verifying via token context): {e}")
 
+        # Check authorization to reassign proctor
+        if (payload.assigned_proctor_user_id or payload.assigned_proctor) and proctor_user.role not in [
+            UserRole.CHIEF_PROCTOR, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN
+        ]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Only Chief Proctors, Institution Administrators, or Platform Admins may assign or reassign proctors."
+            )
+
+        # Check confidential case update permissions
+        is_confidential = (
+            case.get("confidentiality_mode") in ["CONFIDENTIAL", "STRICT_CONFIDENTIAL"] or
+            case.get("is_confidential") is True
+        )
+        if is_confidential and proctor_user.role not in [UserRole.PLATFORM_ADMIN, UserRole.INSTITUTION_ADMIN, UserRole.CHIEF_PROCTOR]:
+            assigned_uuid = case.get("assigned_proctor_user_id")
+            assigned_name = case.get("assigned_proctor")
+            is_assigned_proctor = bool(
+                (assigned_uuid and str(assigned_uuid).lower() == str(proctor_user.user_id).lower()) or
+                (not assigned_uuid and assigned_name and (
+                    str(assigned_name).lower() == str(proctor_user.user_id).lower() or
+                    assigned_name == proctor_user.name
+                ))
+            )
+            is_assigned_comm = False
+            if proctor_user.role == UserRole.COMMITTEE_MEMBER and self.supabase and case.get("id"):
+                try:
+                    res_c = self.supabase.table("case_committee_assignments").select("id").eq(
+                        "case_uuid", case["id"]
+                    ).eq("user_id", proctor_user.user_id).eq("assignment_status", "active").execute()
+                    if res_c.data and len(res_c.data) > 0:
+                        is_assigned_comm = True
+                except Exception as e:
+                    logger.warning(f"Error checking case_committee_assignments: {e}")
+
+            if not is_assigned_proctor and not is_assigned_comm:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Confidential grievances can only be updated by the assigned proctor, designated committee inquiry member, or Chief Proctor."
+                )
+
         # Validate status transition state machine
         current_status = (case.get("status") or "SUBMITTED").strip().upper()
         new_status = payload.new_status.strip().upper()
@@ -795,6 +846,200 @@ Campus Grievance Redressal Committee (SGRC)
         ))
         conn.commit()
         conn.close()
+
+    def assign_committee_member(
+        self,
+        case_id: str,
+        target_user_id: str,
+        role: str = "member",
+        committee_name: Optional[str] = None,
+        assigner_user: Optional[AuthUser] = None
+    ) -> Dict[str, Any]:
+        """
+        Provisions a case-specific committee assignment for a confidential inquiry.
+        Authorizes only Institution Admins, Chief Proctors, or Platform Admins.
+        Enforces that target user holds an active committee_member role in the case's institution.
+        """
+        if not assigner_user or getattr(assigner_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Assigner account is inactive or token is invalid."
+            )
+
+        if assigner_user.role not in [UserRole.INSTITUTION_ADMIN, UserRole.CHIEF_PROCTOR, UserRole.PLATFORM_ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Only Institution Administrators, Chief Proctors, or Platform Admins may provision committee assignments."
+            )
+
+        clean_id = case_id.strip().upper()
+        case = self._fetch_raw_case(clean_id)
+        if not case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
+
+        # Institutional boundary enforcement for assigner
+        verify_institutional_boundary(assigner_user, case.get("institution_id", "INST_DEFAULT"))
+
+        # Database Execution via Security Definer RPC
+        if self.use_supabase and self.supabase:
+            try:
+                rpc_payload = {
+                    "p_case_id": clean_id,
+                    "p_target_user_id": target_user_id,
+                    "p_role": role or "member",
+                    "p_committee_name": committee_name,
+                    "p_assigned_by": assigner_user.user_id
+                }
+                res = self.supabase.rpc("assign_case_committee_member", rpc_payload).execute()
+                if not res.data:
+                    raise RuntimeError("Committee assignment RPC returned empty data.")
+                assignment_record = res.data
+            except Exception as e:
+                err_msg = str(e)
+                logger.error(f"assign_case_committee_member RPC failure: {err_msg}")
+                if "not authorized" in err_msg:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_msg)
+                if "lacks an active committee membership" in err_msg:
+                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err_msg)
+                if "not found" in err_msg:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_msg)
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database assignment failed: {err_msg}")
+        else:
+            assignment_record = {
+                "assignment_id": str(uuid.uuid4()),
+                "case_id": clean_id,
+                "user_id": target_user_id,
+                "role": role,
+                "committee_name": committee_name,
+                "assignment_status": "active"
+            }
+
+        # Log audit activity
+        try:
+            from .audit import record_case_activity
+        except ImportError:
+            from audit import record_case_activity
+
+        record_case_activity(
+            case_uuid=case.get("id"),
+            case_id=clean_id,
+            action_type="COMMITTEE_ASSIGNMENT_PROVISIONED",
+            action_details={
+                "target_user_id": target_user_id,
+                "role": role,
+                "committee_name": committee_name
+            },
+            actor_user=assigner_user,
+            actor_type="USER",
+            supabase_client=self.supabase
+        )
+
+        return assignment_record
+
+    def revoke_committee_assignment(
+        self,
+        case_id: str,
+        target_user_id: str,
+        revoker_user: Optional[AuthUser] = None
+    ) -> Dict[str, Any]:
+        """
+        Revokes a case-specific committee assignment immediately.
+        Authorizes only Institution Admins, Chief Proctors, or Platform Admins.
+        """
+        if not revoker_user or getattr(revoker_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Revoker account is inactive or token is invalid."
+            )
+
+        if revoker_user.role not in [UserRole.INSTITUTION_ADMIN, UserRole.CHIEF_PROCTOR, UserRole.PLATFORM_ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Forbidden: Only Institution Administrators, Chief Proctors, or Platform Admins may revoke committee assignments."
+            )
+
+        clean_id = case_id.strip().upper()
+        case = self._fetch_raw_case(clean_id)
+        if not case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
+
+        verify_institutional_boundary(revoker_user, case.get("institution_id", "INST_DEFAULT"))
+
+        if self.use_supabase and self.supabase:
+            try:
+                rpc_payload = {
+                    "p_case_id": clean_id,
+                    "p_target_user_id": target_user_id,
+                    "p_revoked_by": revoker_user.user_id
+                }
+                res = self.supabase.rpc("revoke_case_committee_assignment", rpc_payload).execute()
+                if not res.data:
+                    raise RuntimeError("Committee revoke RPC returned empty data.")
+                revoked_record = res.data
+            except Exception as e:
+                err_msg = str(e)
+                logger.error(f"revoke_case_committee_assignment RPC failure: {err_msg}")
+                if "not authorized" in err_msg:
+                    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=err_msg)
+                if "not found" in err_msg:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_msg)
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Database revocation failed: {err_msg}")
+        else:
+            revoked_record = {
+                "case_id": clean_id,
+                "user_id": target_user_id,
+                "assignment_status": "revoked"
+            }
+
+        try:
+            from .audit import record_case_activity
+        except ImportError:
+            from audit import record_case_activity
+
+        record_case_activity(
+            case_uuid=case.get("id"),
+            case_id=clean_id,
+            action_type="COMMITTEE_ASSIGNMENT_REVOKED",
+            action_details={"target_user_id": target_user_id},
+            actor_user=revoker_user,
+            actor_type="USER",
+            supabase_client=self.supabase
+        )
+
+        return revoked_record
+
+    def get_committee_assignments(
+        self,
+        case_id: str,
+        officer_user: Optional[AuthUser] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves committee assignments for a specific case.
+        Accessible by Institution Admins, Chief Proctors, Platform Admins, or assigned officers.
+        """
+        if not officer_user or getattr(officer_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive or token is invalid."
+            )
+
+        clean_id = case_id.strip().upper()
+        case = self._fetch_raw_case(clean_id)
+        if not case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
+
+        verify_institutional_boundary(officer_user, case.get("institution_id", "INST_DEFAULT"))
+
+        if self.use_supabase and self.supabase:
+            try:
+                res = self.supabase.table("case_committee_assignments").select(
+                    "id, case_id, user_id, role, committee_name, assignment_status, assigned_at"
+                ).eq("case_id", clean_id).execute()
+                return res.data or []
+            except Exception as e:
+                logger.error(f"Error listing committee assignments: {e}")
+                return []
+        return []
 
     def _list_cases_sqlite(self, institution_id: str, is_admin: bool = False) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self._local_db_path)

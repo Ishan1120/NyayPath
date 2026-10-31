@@ -32,8 +32,22 @@ SIGNED_URL_EXPIRY_SECONDS = 300  # 5 minutes
 
 class DocumentAccessManager:
     def __init__(self, supabase_client=None):
-        self.supabase = supabase_client
+        self._supabase = supabase_client
         self.rate_limiter = rate_limiter
+
+    @property
+    def supabase(self):
+        if self._supabase is not None:
+            return self._supabase
+        try:
+            from api.campus_proctor import campus_proctor_manager
+            return getattr(campus_proctor_manager, "supabase", None)
+        except Exception:
+            return None
+
+    @supabase.setter
+    def supabase(self, value):
+        self._supabase = value
 
     def generate_document_signed_url(
         self,
@@ -41,13 +55,16 @@ class DocumentAccessManager:
         document_id: str,
         auth_header: Optional[str] = None,
         tracking_key: Optional[str] = None,
-        client_ip: str = "127.0.0.1"
+        client_ip: str = "127.0.0.1",
+        ttl: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Orchestrates dual-pathway authorization to generate a short-lived signed URL for a case document.
+        Strictly enforces server-side maximum TTL cap of 300 seconds (SIGNED_URL_EXPIRY_SECONDS).
         """
         clean_case_id = case_id.strip().upper()
         clean_doc_id = document_id.strip()
+        effective_ttl = min(ttl, SIGNED_URL_EXPIRY_SECONDS) if (ttl is not None and ttl > 0) else SIGNED_URL_EXPIRY_SECONDS
 
         # Pathway 1: Authenticated User (Bearer Token)
         if auth_header and auth_header.startswith("Bearer "):
@@ -62,7 +79,7 @@ class DocumentAccessManager:
                     detail=f"Invalid authentication token: {str(e)}"
                 )
 
-            return self._authorize_authenticated_access(clean_case_id, clean_doc_id, auth_user)
+            return self._authorize_authenticated_access(clean_case_id, clean_doc_id, auth_user, ttl=effective_ttl)
 
         # Pathway 2: Anonymous Citizen / Student (Tracking Key)
         elif tracking_key:
@@ -75,7 +92,7 @@ class DocumentAccessManager:
                     headers={"Retry-After": str(retry_after or 60)}
                 )
 
-            return self._authorize_anonymous_access(clean_case_id, clean_doc_id, tracking_key)
+            return self._authorize_anonymous_access(clean_case_id, clean_doc_id, tracking_key, ttl=effective_ttl)
 
         else:
             raise HTTPException(
@@ -87,7 +104,8 @@ class DocumentAccessManager:
         self,
         case_id: str,
         document_id: str,
-        user: AuthUser
+        user: AuthUser,
+        ttl: int = SIGNED_URL_EXPIRY_SECONDS
     ) -> Dict[str, Any]:
         """
         Pathway 1: Validates authenticated user role, account status, institutional boundary,
@@ -109,7 +127,7 @@ class DocumentAccessManager:
 
         # 3. Platform Admin has emergency global oversight
         if user.role == UserRole.PLATFORM_ADMIN:
-            return self._create_signed_url(case_id, document_id, access_type="PLATFORM_ADMIN")
+            return self._create_signed_url(case_id, document_id, access_type="PLATFORM_ADMIN", ttl=ttl)
 
         case = self._fetch_case(case_id)
         if not case:
@@ -182,11 +200,11 @@ class DocumentAccessManager:
                     is_assigned_committee = True
 
             if is_assigned_proctor:
-                return self._create_signed_url(case_id, document_id, access_type="ASSIGNED_PROCTOR")
+                return self._create_signed_url(case_id, document_id, access_type="ASSIGNED_PROCTOR", ttl=ttl)
             elif user.role == UserRole.INSTITUTION_ADMIN:
-                return self._create_signed_url(case_id, document_id, access_type="INSTITUTION_ADMIN")
+                return self._create_signed_url(case_id, document_id, access_type="INSTITUTION_ADMIN", ttl=ttl)
             elif is_assigned_committee:
-                return self._create_signed_url(case_id, document_id, access_type="COMMITTEE_MEMBER")
+                return self._create_signed_url(case_id, document_id, access_type="COMMITTEE_MEMBER", ttl=ttl)
             else:
                 # Unassigned proctor or unassigned committee member in same institution:
                 # Permitted only for standard non-confidential cases (institutional intake triage);
@@ -196,7 +214,7 @@ class DocumentAccessManager:
                         status_code=status.HTTP_403_FORBIDDEN,
                         detail="Access denied: Confidential grievance documents require direct case assignment or committee membership."
                     )
-                return self._create_signed_url(case_id, document_id, access_type="UNASSIGNED_INSTITUTION_PROCTOR")
+                return self._create_signed_url(case_id, document_id, access_type="UNASSIGNED_INSTITUTION_PROCTOR", ttl=ttl)
 
         # 6. Citizen / Student Owner
         if case.get("student_user_id") != user.user_id and case.get("user_id") != user.user_id:
@@ -205,13 +223,14 @@ class DocumentAccessManager:
                 detail="Access denied: You do not have permission to access documents for this case."
             )
 
-        return self._create_signed_url(case_id, document_id, access_type="CASE_OWNER")
+        return self._create_signed_url(case_id, document_id, access_type="CASE_OWNER", ttl=ttl)
 
     def _authorize_anonymous_access(
         self,
         case_id: str,
         document_id: str,
-        tracking_key: str
+        tracking_key: str,
+        ttl: int = SIGNED_URL_EXPIRY_SECONDS
     ) -> Dict[str, Any]:
         """
         Pathway 2: Validates anonymous high-entropy tracking key against stored HMAC hash.
@@ -241,7 +260,7 @@ class DocumentAccessManager:
         # Verify document belongs to case
         self._verify_document_belongs_to_case(case, document_id)
 
-        return self._create_signed_url(case_id, document_id, access_type="ANONYMOUS_VERIFIED")
+        return self._create_signed_url(case_id, document_id, access_type="ANONYMOUS_VERIFIED", ttl=ttl)
 
     def _verify_document_belongs_to_case(self, case: Dict[str, Any], document_id: str) -> None:
         """
@@ -296,17 +315,19 @@ class DocumentAccessManager:
         from api.campus_proctor import campus_proctor_manager
         return campus_proctor_manager._fetch_raw_case(case_id)
 
-    def _create_signed_url(self, case_id: str, document_id: str, access_type: str) -> Dict[str, Any]:
+    def _create_signed_url(self, case_id: str, document_id: str, access_type: str, ttl: int = SIGNED_URL_EXPIRY_SECONDS) -> Dict[str, Any]:
         """
-        Generates narrowly-scoped, short-lived signed URL (300s TTL) using backend credentials.
+        Generates narrowly-scoped, short-lived signed URL (max 300s TTL) using backend credentials.
+        Strictly enforces server-side maximum TTL cap of 300 seconds (SIGNED_URL_EXPIRY_SECONDS).
         """
         doc_path = f"{case_id}/{document_id}"
         signed_url = None
+        effective_ttl = min(ttl, SIGNED_URL_EXPIRY_SECONDS) if (ttl is not None and ttl > 0) else SIGNED_URL_EXPIRY_SECONDS
 
         if self.supabase:
             try:
                 res = self.supabase.storage.from_(CANONICAL_STORAGE_BUCKET).create_signed_url(
-                    doc_path, SIGNED_URL_EXPIRY_SECONDS
+                    doc_path, effective_ttl
                 )
                 if isinstance(res, dict) and "signedURL" in res:
                     signed_url = res["signedURL"]
@@ -317,13 +338,13 @@ class DocumentAccessManager:
 
         if not signed_url:
             # Mock signed URL for local development/testing
-            signed_url = f"https://mock-storage.nyaypath.internal/{CANONICAL_STORAGE_BUCKET}/{doc_path}?token=mock_signed_ttl300"
+            signed_url = f"https://mock-storage.nyaypath.internal/{CANONICAL_STORAGE_BUCKET}/{doc_path}?token=mock_signed_ttl{effective_ttl}"
 
         return {
             "case_id": case_id,
             "document_id": document_id,
             "signed_url": signed_url,
-            "expires_in_seconds": SIGNED_URL_EXPIRY_SECONDS,
+            "expires_in_seconds": effective_ttl,
             "access_type": access_type,
             "bucket": CANONICAL_STORAGE_BUCKET
         }

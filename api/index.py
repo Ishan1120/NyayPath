@@ -49,8 +49,11 @@ try:
         campus_proctor_manager,
         StudentGrievanceSubmit,
         ProctorUpdateStatus,
-        StudentTrackingRequest
+        StudentTrackingRequest,
+        CaseCommitteeAssignRequest,
+        CaseCommitteeRevokeRequest
     )
+    from .document_access import DocumentAccessManager
     from .rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from .auth import (
         AuthUser,
@@ -88,8 +91,11 @@ except ImportError:
         campus_proctor_manager,
         StudentGrievanceSubmit,
         ProctorUpdateStatus,
-        StudentTrackingRequest
+        StudentTrackingRequest,
+        CaseCommitteeAssignRequest,
+        CaseCommitteeRevokeRequest
     )
+    from document_access import DocumentAccessManager
     from rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from auth import (
         AuthUser,
@@ -105,6 +111,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="NyayPath AI API", version="2.6")
+document_access_manager = DocumentAccessManager()
 
 # =====================================================================
 # CORS Configuration (Phase 1.3.4 — restricted from wildcard)
@@ -1059,6 +1066,90 @@ def generate_proctor_notice(
     key = verification_key or request.headers.get("x-verification-key")
     notice_text = campus_proctor_manager.generate_proctorial_notice(case_id, user=user, verification_key=key)
     return {"case_id": case_id, "notice_text": notice_text}
+
+
+@app.post("/api/campus-proctor/committee/assign")
+def assign_committee_member_endpoint(payload: CaseCommitteeAssignRequest, request: Request):
+    """
+    Assigns an institutional committee member to a case inquiry.
+    Authorized strictly for Institution Admins, Chief Proctors, or Platform Admins.
+    Target member must belong to the same institution with active account status.
+    """
+    user = get_current_authenticated_user(request)
+    if user.role not in [UserRole.CHIEF_PROCTOR, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: Only Chief Proctors, Institution Admins, or Platform Admins may assign committee members."
+        )
+    assignment = campus_proctor_manager.assign_committee_member(
+        case_id=payload.case_id,
+        target_user_id=payload.target_user_id,
+        role=payload.role,
+        committee_name=payload.committee_name,
+        assigner_user=user
+    )
+    return {"status": "success", "assignment": assignment}
+
+
+@app.post("/api/campus-proctor/committee/revoke")
+def revoke_committee_member_endpoint(payload: CaseCommitteeRevokeRequest, request: Request):
+    """
+    Revokes an institutional committee member's assignment from a case inquiry.
+    Authorized strictly for Institution Admins, Chief Proctors, or Platform Admins.
+    """
+    user = get_current_authenticated_user(request)
+    if user.role not in [UserRole.CHIEF_PROCTOR, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: Only Chief Proctors, Institution Admins, or Platform Admins may revoke committee assignments."
+        )
+    assignment = campus_proctor_manager.revoke_committee_assignment(
+        case_id=payload.case_id,
+        target_user_id=payload.target_user_id,
+        revoker_user=user
+    )
+    return {"status": "success", "assignment": assignment}
+
+
+@app.get("/api/campus-proctor/committee/assignments/{case_id}")
+def get_committee_assignments_endpoint(case_id: str, request: Request):
+    """
+    Lists active committee assignments for a case inquiry.
+    Authorized for institutional officers belonging to the case's institution.
+    """
+    user = get_current_authenticated_user(request)
+    assignments = campus_proctor_manager.get_committee_assignments(case_id, user)
+    return {"case_id": case_id, "assignments": assignments}
+
+
+@app.get("/api/campus-proctor/document-url")
+def get_case_document_url(
+    case_id: str,
+    document_id: str,
+    request: Request,
+    verification_key: Optional[str] = None,
+    ttl: Optional[int] = None
+):
+    """
+    Generates a secure short-lived signed URL for accessing a case document.
+    Enforces dual-pathway authentication and server-side TTL cap (strictly <= 300 seconds).
+    """
+    auth_header = request.headers.get("Authorization")
+    key = verification_key or request.headers.get("x-verification-key")
+    client_ip = request.client.host if request.client else "127.0.0.1"
+
+    # Enforce TTL clamping if provided: under no circumstances can client override beyond 300s
+    effective_ttl = min(ttl, 300) if (ttl is not None and ttl > 0) else 300
+
+    result = document_access_manager.generate_document_signed_url(
+        case_id=case_id,
+        document_id=document_id,
+        auth_header=auth_header,
+        tracking_key=key,
+        client_ip=client_ip,
+        ttl=effective_ttl
+    )
+    return result
 
 
 @app.post("/api/intake/clarifying-questions")
