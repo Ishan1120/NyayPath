@@ -280,6 +280,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = '';
 
+-- Drop legacy migration 001 updated_at trigger; public.cases is now the authoritative timestamp source
+DROP TRIGGER IF EXISTS trg_campus_cases_updated_at ON public.campus_cases;
+
 DROP TRIGGER IF EXISTS trg_sync_campus_case_insert ON public.campus_cases;
 CREATE TRIGGER trg_sync_campus_case_insert
     BEFORE INSERT ON public.campus_cases
@@ -719,6 +722,30 @@ USING (
     private.is_platform_admin()
 );
 
+-- Restrict direct table and column update privileges on public.campus_cases
+REVOKE ALL PRIVILEGES ON public.campus_cases FROM PUBLIC, anon;
+REVOKE UPDATE, DELETE, TRUNCATE ON public.campus_cases FROM authenticated;
+
+-- Allow authenticated users to SELECT (subject to RLS policies)
+GRANT SELECT ON public.campus_cases TO authenticated;
+
+-- Allow backend service_role full management
+GRANT ALL PRIVILEGES ON public.campus_cases TO service_role;
+
+-- Grant column-level UPDATE ONLY on operational, non-authoritative officer fields.
+-- Sensitive fields (confidentiality_mode, assigned_proctor, assigned_committee,
+-- status, institution_uuid, institution_id, student_user_id, student_name,
+-- roll_number, case_id, id, verification_key_hash, created_at, key_version)
+-- are strictly IMMUTABLE against direct client/PostgREST PATCH requests.
+GRANT UPDATE (
+    proctor_notes,
+    action_taken,
+    hearing_date,
+    resolution_details,
+    resolution_deadline,
+    supporting_documents
+) ON public.campus_cases TO authenticated;
+
 -- =====================================================================
 -- 9. PUBLIC.CONFIDENTIAL_STUDENT_IDENTITIES (PII Vault)
 -- =====================================================================
@@ -768,19 +795,42 @@ REVOKE ALL PRIVILEGES ON public.case_documents FROM PUBLIC, anon;
 GRANT SELECT, INSERT ON public.case_documents TO authenticated, service_role;
 
 DROP POLICY IF EXISTS "Authenticated users can view attachments for their cases" ON public.case_documents;
-CREATE POLICY "Authenticated users can view attachments for their cases"
+DROP POLICY IF EXISTS "Authorized users view case documents" ON public.case_documents;
+CREATE POLICY "Authorized users view case documents"
     ON public.case_documents FOR SELECT
     TO authenticated
     USING (
-        uploader_user_id = auth.uid()
-        OR private.is_platform_admin()
-        OR EXISTS (
+        -- 1. Platform administrator access
+        private.is_platform_admin()
+        OR
+        -- 2. Student case-owner access
+        EXISTS (
+            SELECT 1 FROM public.campus_cases cc
+            WHERE cc.id = case_documents.case_uuid
+              AND cc.student_user_id = auth.uid()
+        )
+        OR
+        -- 3. Student uploader access (non-officers)
+        (
+            case_documents.uploader_user_id = auth.uid()
+            AND NOT EXISTS (
+                SELECT 1 FROM public.institution_memberships im
+                WHERE im.user_id = auth.uid()
+            )
+        )
+        OR
+        -- 4. Authorized institutional officers (including officer uploader, assigned proctor, committee)
+        -- REQUIRES active institutional membership AND appropriate case confidentiality clearance
+        EXISTS (
             SELECT 1 FROM public.campus_cases cc
             WHERE cc.id = case_documents.case_uuid
               AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
               AND (
                   (cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL') AND case_documents.is_confidential IS NOT TRUE)
                   OR cc.assigned_proctor = auth.uid()::text
+                  OR cc.assigned_proctor IN (
+                      SELECT p.full_name FROM public.profiles p WHERE p.id = auth.uid() AND p.full_name IS NOT NULL
+                  )
                   OR EXISTS (
                       SELECT 1 FROM public.institution_memberships im
                       WHERE im.user_id = auth.uid()
@@ -879,27 +929,35 @@ CREATE POLICY "Officers and users can view authorized activity logs"
         -- 2. Authenticated users can view actions associated with their active audit_actor_id
         audit_actor_id = private.get_current_user_audit_actor_id()
         OR
-        -- 3. Officers can view logs only for cases they are authorized to access (enforcing institutional scope & confidentiality)
+        -- 3. Case activity log viewing for student case owner and authorized institutional officers
         EXISTS (
             SELECT 1 FROM public.campus_cases cc
             WHERE cc.id = case_activity_log.case_uuid
-              AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
               AND (
-                  cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
-                  OR cc.assigned_proctor = auth.uid()::text
-                  OR EXISTS (
-                      SELECT 1 FROM public.profiles p
-                      WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = cc.assigned_proctor
-                  )
-                  OR EXISTS (
-                      SELECT 1 FROM public.institution_memberships im
-                      WHERE im.user_id = auth.uid()
-                        AND (
-                            (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
-                            OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
-                        )
-                        AND im.role IN ('committee_member', 'institution_admin')
-                        AND im.account_status = 'active'
+                  -- Student case owner can view activity logs for their own grievance
+                  cc.student_user_id = auth.uid()
+                  OR
+                  -- Institutional officers enforcing institutional scope & confidentiality
+                  (
+                      private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
+                      AND (
+                          cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
+                          OR cc.assigned_proctor = auth.uid()::text
+                          OR EXISTS (
+                              SELECT 1 FROM public.profiles p
+                              WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = cc.assigned_proctor
+                          )
+                          OR EXISTS (
+                              SELECT 1 FROM public.institution_memberships im
+                              WHERE im.user_id = auth.uid()
+                                AND (
+                                    (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
+                                    OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
+                                )
+                                AND im.role IN ('committee_member', 'institution_admin')
+                                AND im.account_status = 'active'
+                          )
+                      )
                   )
               )
         )
@@ -1009,16 +1067,7 @@ BEGIN
                     -- 1. Platform Admin global oversight
                     private.is_platform_admin()
                     OR
-                    -- 2. Direct uploader/owner
-                    owner = auth.uid()
-                    OR
-                    EXISTS (
-                        SELECT 1 FROM public.case_documents cd
-                        WHERE cd.storage_path = storage.objects.name
-                          AND cd.uploader_user_id = auth.uid()
-                    )
-                    OR
-                    -- 3. Case Owner (Student)
+                    -- 2. Student case-owner access
                     EXISTS (
                         SELECT 1 FROM public.case_documents cd
                         JOIN public.campus_cases cc ON cc.id = cd.case_uuid
@@ -1026,7 +1075,24 @@ BEGIN
                           AND cc.student_user_id = auth.uid()
                     )
                     OR
-                    -- 4. Authorized institutional officers matching case confidentiality
+                    -- 3. Student uploader access (non-officers)
+                    (
+                        (
+                            owner = auth.uid()
+                            OR EXISTS (
+                                SELECT 1 FROM public.case_documents cd
+                                WHERE cd.storage_path = storage.objects.name
+                                  AND cd.uploader_user_id = auth.uid()
+                            )
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM public.institution_memberships im
+                            WHERE im.user_id = auth.uid()
+                        )
+                    )
+                    OR
+                    -- 4. Authorized institutional officers (including officer uploader, assigned proctor, committee)
+                    -- REQUIRES active institutional membership AND appropriate case confidentiality clearance
                     EXISTS (
                         SELECT 1 FROM public.case_documents cd
                         JOIN public.campus_cases cc ON cc.id = cd.case_uuid
@@ -1035,6 +1101,9 @@ BEGIN
                           AND (
                               (cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL') AND cd.is_confidential IS NOT TRUE)
                               OR cc.assigned_proctor = auth.uid()::text
+                              OR cc.assigned_proctor IN (
+                                  SELECT p.full_name FROM public.profiles p WHERE p.id = auth.uid() AND p.full_name IS NOT NULL
+                              )
                               OR EXISTS (
                                   SELECT 1 FROM public.institution_memberships im
                                   WHERE im.user_id = auth.uid()

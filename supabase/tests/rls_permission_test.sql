@@ -213,11 +213,29 @@ BEGIN
     ASSERT v_count = 0, 'Test 3.1 Failed: Unassigned Proctor X must update 0 rows on confidential Case C!';
     RAISE NOTICE '[PASS] Test 3.1: Unassigned Proctor X UPDATE on confidential grievance blocked (0 rows updated)';
 
-    -- Test 3.2: Unassigned Proctor X CANNOT downgrade confidentiality_mode to NORMAL on Case C
-    UPDATE public.campus_cases SET confidentiality_mode = 'NORMAL' WHERE id = v_case_c_uuid;
-    GET DIAGNOSTICS v_count = ROW_COUNT;
-    ASSERT v_count = 0, 'Test 3.2 Failed: Confidentiality downgrade bypass must update 0 rows!';
-    RAISE NOTICE '[PASS] Test 3.2: Confidentiality mode downgrade bypass blocked (0 rows updated)';
+    -- Test 3.2: Direct UPDATE on sensitive column confidentiality_mode is rejected by column permissions
+    BEGIN
+        UPDATE public.campus_cases SET confidentiality_mode = 'NORMAL' WHERE id = v_case_b_uuid;
+        RAISE EXCEPTION 'Test 3.2 Failed: Direct column UPDATE on confidentiality_mode should have been denied!';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE '[PASS] Test 3.2: Direct column UPDATE on confidentiality_mode strictly denied by column privileges';
+    END;
+
+    -- Test 3.2b: Direct UPDATE on sensitive column status is rejected by column permissions (preserves atomic RPC)
+    BEGIN
+        UPDATE public.campus_cases SET status = 'RESOLVED' WHERE id = v_case_b_uuid;
+        RAISE EXCEPTION 'Test 3.2b Failed: Direct column UPDATE on status should have been denied!';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE '[PASS] Test 3.2b: Direct column UPDATE on status strictly denied (preserves atomic RPC)';
+    END;
+
+    -- Test 3.2c: Direct UPDATE on sensitive column assigned_proctor is rejected by column permissions
+    BEGIN
+        UPDATE public.campus_cases SET assigned_proctor = v_proctor_x_id::text WHERE id = v_case_c_uuid;
+        RAISE EXCEPTION 'Test 3.2c Failed: Direct column UPDATE on assigned_proctor should have been denied!';
+    EXCEPTION WHEN insufficient_privilege THEN
+        RAISE NOTICE '[PASS] Test 3.2c: Direct column UPDATE on assigned_proctor strictly denied';
+    END;
 
     -- Test 3.3: Assigned Proctor X CAN update notes on assigned confidential grievance (Case B)
     UPDATE public.campus_cases SET proctor_notes = 'Legitimate update by assigned proctor' WHERE id = v_case_b_uuid;
@@ -313,6 +331,33 @@ BEGIN
     SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents';
     ASSERT v_count = 0, 'Test 6.5 Failed: Anonymous role must see 0 objects';
     RAISE NOTICE '[PASS] Test 6.5: Direct anonymous access on storage.objects is strictly 0 rows';
+
+    -- Test 6.6: Institutional officer uploader CANNOT retain access to uploaded document after membership revocation
+    -- Setup: Yolanda is an active proctor in College Y who uploaded yolanda_doc.pdf
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_y_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-INST-Y/yolanda_doc.pdf';
+    ASSERT v_count = 1, 'Test 6.6 Setup Failed: Active officer Yolanda should view uploaded document';
+    RAISE NOTICE '[PASS] Test 6.6a: Active officer Yolanda accesses uploaded document in College Y';
+
+    -- Now revoke/suspend Yolanda membership
+    EXECUTE 'SET LOCAL ROLE postgres';
+    UPDATE public.institution_memberships SET account_status = 'suspended' WHERE user_id = v_proctor_y_id;
+
+    -- Yolanda tries to access document again after membership revocation
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_y_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-INST-Y/yolanda_doc.pdf';
+    ASSERT v_count = 0, 'Test 6.6 Failed: Suspended officer Yolanda must NOT access document even though she is the uploader!';
+    RAISE NOTICE '[PASS] Test 6.6b: Revoked/suspended officer Yolanda immediately loses document access despite being uploader/owner';
+
+    SELECT count(*) INTO v_count FROM public.case_documents WHERE storage_path = 'CAMPUS-INST-Y/yolanda_doc.pdf';
+    ASSERT v_count = 0, 'Test 6.6c Failed: Suspended officer Yolanda must NOT view case_documents row';
+    RAISE NOTICE '[PASS] Test 6.6c: Revoked/suspended officer Yolanda loses case_documents metadata access';
 
     -- =================================================================
     -- SECTION 7: Audit Immutability & Privileged RPC Protection
