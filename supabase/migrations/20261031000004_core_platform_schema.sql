@@ -496,7 +496,7 @@ CREATE TABLE IF NOT EXISTS public.profiles (
     full_name TEXT,
     phone TEXT,
     role VARCHAR(32) NOT NULL DEFAULT 'citizen' CHECK (
-        role IN ('citizen', 'student', 'proctor', 'committee_member', 'institution_admin', 'platform_admin')
+        role IN ('citizen', 'student', 'proctor', 'chief_proctor', 'committee_member', 'institution_admin', 'platform_admin')
     ),
     account_status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (
         account_status IN ('active', 'suspended', 'deactivated', 'revoked')
@@ -565,7 +565,7 @@ CREATE TABLE IF NOT EXISTS public.institution_memberships (
     institution_id UUID NOT NULL REFERENCES public.institutions(id) ON DELETE RESTRICT,
     institution_code VARCHAR(64) NOT NULL,
     role VARCHAR(32) NOT NULL CHECK (
-        role IN ('proctor', 'committee_member', 'institution_admin', 'platform_admin')
+        role IN ('proctor', 'chief_proctor', 'committee_member', 'institution_admin', 'platform_admin')
     ),
     account_status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (
         account_status IN ('active', 'suspended', 'revoked')
@@ -613,7 +613,7 @@ AS $$
         OR (p_institution_uuid IS NULL AND p_institution_code IS NOT NULL AND im.institution_code = p_institution_code)
       )
       AND im.account_status = 'active'
-      AND im.role IN ('proctor', 'committee_member', 'institution_admin')
+      AND im.role IN ('proctor', 'chief_proctor', 'committee_member', 'institution_admin')
   );
 $$;
 
@@ -621,9 +621,13 @@ REVOKE ALL PRIVILEGES ON FUNCTION private.can_officer_access_case(UUID, TEXT) FR
 GRANT EXECUTE ON FUNCTION private.can_officer_access_case(UUID, TEXT) TO authenticated, service_role;
 
 -- =====================================================================
--- 8b. AUTHORITATIVE CAMPUS_CASES RLS POLICIES (Institutional Scoping)
+-- 8b. AUTHORITATIVE CAMPUS_CASES RLS POLICIES (Institutional Scoping & Confidentiality Gating)
 -- =====================================================================
 -- Replaces legacy migration 002 JWT app_metadata policies with live database checks.
+-- Enforces:
+-- 1. Standard / non-confidential grievances: viewable by all active institution officers for triage.
+-- 2. Confidential / strict-confidential grievances: strictly viewable only by directly assigned proctor
+--    or authorized committee members / institution admins. Unassigned proctors are blocked.
 
 DROP POLICY IF EXISTS "Officers view institutional grievances" ON public.campus_cases;
 CREATE POLICY "Officers view institutional grievances"
@@ -631,7 +635,27 @@ ON public.campus_cases FOR SELECT
 TO authenticated
 USING (
     private.is_platform_admin()
-    OR private.can_officer_access_case(institution_uuid, institution_id)
+    OR (
+        private.can_officer_access_case(institution_uuid, institution_id)
+        AND (
+            confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
+            OR assigned_proctor = auth.uid()::text
+            OR EXISTS (
+                SELECT 1 FROM public.profiles p
+                WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = campus_cases.assigned_proctor
+            )
+            OR EXISTS (
+                SELECT 1 FROM public.institution_memberships im
+                WHERE im.user_id = auth.uid()
+                  AND (
+                      (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                      OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                  )
+                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.account_status = 'active'
+            )
+        )
+    )
 );
 
 DROP POLICY IF EXISTS "Officers update institutional grievances" ON public.campus_cases;
@@ -640,11 +664,51 @@ ON public.campus_cases FOR UPDATE
 TO authenticated
 USING (
     private.is_platform_admin()
-    OR private.can_officer_access_case(institution_uuid, institution_id)
+    OR (
+        private.can_officer_access_case(institution_uuid, institution_id)
+        AND (
+            confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
+            OR assigned_proctor = auth.uid()::text
+            OR EXISTS (
+                SELECT 1 FROM public.profiles p
+                WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = campus_cases.assigned_proctor
+            )
+            OR EXISTS (
+                SELECT 1 FROM public.institution_memberships im
+                WHERE im.user_id = auth.uid()
+                  AND (
+                      (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                      OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                  )
+                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.account_status = 'active'
+            )
+        )
+    )
 )
 WITH CHECK (
     private.is_platform_admin()
-    OR private.can_officer_access_case(institution_uuid, institution_id)
+    OR (
+        private.can_officer_access_case(institution_uuid, institution_id)
+        AND (
+            confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
+            OR assigned_proctor = auth.uid()::text
+            OR EXISTS (
+                SELECT 1 FROM public.profiles p
+                WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = campus_cases.assigned_proctor
+            )
+            OR EXISTS (
+                SELECT 1 FROM public.institution_memberships im
+                WHERE im.user_id = auth.uid()
+                  AND (
+                      (campus_cases.institution_uuid IS NOT NULL AND im.institution_id = campus_cases.institution_uuid)
+                      OR (campus_cases.institution_uuid IS NULL AND im.institution_code = campus_cases.institution_id)
+                  )
+                  AND im.role IN ('committee_member', 'institution_admin')
+                  AND im.account_status = 'active'
+            )
+        )
+    )
 );
 
 DROP POLICY IF EXISTS "Strict delete platform admin only" ON public.campus_cases;
@@ -815,11 +879,29 @@ CREATE POLICY "Officers and users can view authorized activity logs"
         -- 2. Authenticated users can view actions associated with their active audit_actor_id
         audit_actor_id = private.get_current_user_audit_actor_id()
         OR
-        -- 3. Officers can view logs for cases belonging to their authorized institution
+        -- 3. Officers can view logs only for cases they are authorized to access (enforcing institutional scope & confidentiality)
         EXISTS (
             SELECT 1 FROM public.campus_cases cc
             WHERE cc.id = case_activity_log.case_uuid
               AND private.can_officer_access_case(cc.institution_uuid, cc.institution_id)
+              AND (
+                  cc.confidentiality_mode NOT IN ('CONFIDENTIAL', 'STRICT_CONFIDENTIAL')
+                  OR cc.assigned_proctor = auth.uid()::text
+                  OR EXISTS (
+                      SELECT 1 FROM public.profiles p
+                      WHERE p.id = auth.uid() AND p.full_name IS NOT NULL AND p.full_name = cc.assigned_proctor
+                  )
+                  OR EXISTS (
+                      SELECT 1 FROM public.institution_memberships im
+                      WHERE im.user_id = auth.uid()
+                        AND (
+                            (cc.institution_uuid IS NOT NULL AND im.institution_id = cc.institution_uuid)
+                            OR (cc.institution_uuid IS NULL AND im.institution_code = cc.institution_id)
+                        )
+                        AND im.role IN ('committee_member', 'institution_admin')
+                        AND im.account_status = 'active'
+                  )
+              )
         )
     );
 

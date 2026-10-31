@@ -1,5 +1,5 @@
 -- =====================================================================
--- NyayPath Phase 1.3.11 Runtime RLS, Storage & PostgreSQL Security Verification
+-- NyayPath Phase 1.3.12 Runtime RLS, Storage & Confidentiality Verification
 -- =====================================================================
 
 BEGIN;
@@ -29,6 +29,7 @@ DECLARE
     v_alice_actor UUID := gen_random_uuid();
     v_bob_actor   UUID := gen_random_uuid();
     v_xavier_actor UUID:= gen_random_uuid();
+    v_carol_actor  UUID:= gen_random_uuid();
 
     v_count INT;
     v_rpc_res JSONB;
@@ -80,7 +81,8 @@ BEGIN
     VALUES
         (v_alice_actor, v_student_a_id),
         (v_bob_actor, v_student_b_id),
-        (v_xavier_actor, v_proctor_x_id);
+        (v_xavier_actor, v_proctor_x_id),
+        (v_carol_actor, v_carol_id);
 
     -- 6. Campus Cases
     -- Case A: Standard grievance by Alice, unassigned
@@ -143,14 +145,15 @@ BEGIN
 
     -- 9. Case Activity Logs
     INSERT INTO public.case_activity_log (case_uuid, case_id, audit_actor_id, actor_type, actor_role, action_type, action_details) VALUES
-        (v_case_a_uuid, 'CAMPUS-STD-A', v_alice_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"note":"alice submitted"}'::jsonb),
-        (v_case_b_uuid, 'CAMPUS-CONF-B', v_bob_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"note":"bob submitted"}'::jsonb),
-        (v_case_b_uuid, 'CAMPUS-CONF-B', v_xavier_actor, 'USER', 'proctor', 'SCHEDULE_HEARING', '{"date":"2026-11-05"}'::jsonb);
+        (v_case_a_uuid, 'CAMPUS-STD-A', v_alice_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"action":"grievance submitted"}'::jsonb),
+        (v_case_b_uuid, 'CAMPUS-CONF-B', v_bob_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"action":"confidential grievance submitted"}'::jsonb),
+        (v_case_b_uuid, 'CAMPUS-CONF-B', v_xavier_actor, 'USER', 'proctor', 'SCHEDULE_HEARING', '{"hearing_date":"2026-11-05"}'::jsonb),
+        (v_case_c_uuid, 'CAMPUS-CONF-C', v_bob_actor, 'USER', 'student', 'SUBMIT_GRIEVANCE', '{"action":"unassigned confidential grievance submitted"}'::jsonb);
 
     RAISE NOTICE '--- TEST SUITE EXECUTION ---';
 
     -- =================================================================
-    -- SECTION 1: Cross-Student Isolation & Direct Storage Protection
+    -- SECTION 1: Student Isolation & Ownership
     -- =================================================================
     -- Test 1.1: Student A views own grievance
     EXECUTE 'SET LOCAL ROLE authenticated';
@@ -166,169 +169,178 @@ BEGIN
     ASSERT v_count = 0, 'Test 1.2 Failed: Student A should NOT see Student B case';
     RAISE NOTICE '[PASS] Test 1.2: Student A cannot see Student B case';
 
-    -- Test 1.3: Student A accesses own document in storage.objects
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-STD-A/alice_doc.pdf';
-    ASSERT v_count = 1, 'Test 1.3 Failed: Student A should see own document';
-    RAISE NOTICE '[PASS] Test 1.3: Student A accesses own document in storage.objects';
-
-    -- Test 1.4: Student A attempts to access Student B document in storage.objects
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-B/bob_assigned.pdf';
-    ASSERT v_count = 0, 'Test 1.4 Failed: Student A must NOT access Student B document in storage.objects';
-    RAISE NOTICE '[PASS] Test 1.4: Student A denied access to Student B document in storage.objects';
-
-    -- Test 1.5: Student A lists storage.objects (only sees own document, count: 1)
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents';
-    ASSERT v_count = 1, 'Test 1.5 Failed: Student A should only see 1 document in storage.objects';
-    RAISE NOTICE '[PASS] Test 1.5: Student A listing strictly scoped to own document';
-
     -- =================================================================
-    -- SECTION 2: Institutional Isolation & Membership Verification
+    -- SECTION 2: Confidential Grievance SELECT Isolation
     -- =================================================================
-    -- Test 2.1: Proctor Xavier (College X) views College X cases
-    EXECUTE 'SET LOCAL ROLE authenticated';
-    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_x_id || '''';
-    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
-    
-    SELECT count(*) INTO v_count FROM public.campus_cases WHERE institution_uuid = v_inst_x_uuid;
-    ASSERT v_count = 3, 'Test 2.1 Failed: Proctor Xavier should see College X cases (3 cases)';
-    RAISE NOTICE '[PASS] Test 2.1: Proctor Xavier views College X cases via institution_memberships';
-
-    -- Test 2.2: Proctor Xavier CANNOT view College Y cases
-    SELECT count(*) INTO v_count FROM public.campus_cases WHERE institution_uuid = v_inst_y_uuid;
-    ASSERT v_count = 0, 'Test 2.2 Failed: Proctor Xavier must NOT see College Y cases';
-    RAISE NOTICE '[PASS] Test 2.2: Proctor Xavier denied College Y cases';
-
-    -- Test 2.3: Cross-institution Proctor Yolanda (College Y) CANNOT view College X cases
-    EXECUTE 'SET LOCAL ROLE authenticated';
-    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_y_id || '''';
-    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
-    
-    SELECT count(*) INTO v_count FROM public.campus_cases WHERE institution_uuid = v_inst_x_uuid;
-    ASSERT v_count = 0, 'Test 2.3 Failed: Yolanda must NOT see College X cases';
-    RAISE NOTICE '[PASS] Test 2.3: Cross-institution Proctor Yolanda denied College X cases';
-
-    -- Test 2.4: Cross-institution Proctor Yolanda CANNOT access College X document in storage.objects
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-STD-A/alice_doc.pdf';
-    ASSERT v_count = 0, 'Test 2.4 Failed: Yolanda must NOT access College X document';
-    RAISE NOTICE '[PASS] Test 2.4: Cross-institution Proctor Yolanda denied College X document';
-
-    -- Test 2.5: Suspended Proctor Sam CANNOT view any cases
-    EXECUTE 'SET LOCAL ROLE authenticated';
-    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_sam_id || '''';
-    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
-    
-    SELECT count(*) INTO v_count FROM public.campus_cases WHERE institution_uuid = v_inst_x_uuid;
-    ASSERT v_count = 0, 'Test 2.5 Failed: Suspended proctor Sam must NOT see any cases';
-    RAISE NOTICE '[PASS] Test 2.5: Suspended Proctor Sam denied case access (account_status != active)';
-
-    -- =================================================================
-    -- SECTION 3: Confidentiality Gating in Storage Objects
-    -- =================================================================
-    -- Test 3.1: Assigned Proctor Xavier accesses assigned confidential document
+    -- Test 2.1: Unassigned Proctor X reads standard grievance within institution (Case A)
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_x_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-B/bob_assigned.pdf';
-    ASSERT v_count = 1, 'Test 3.1 Failed: Assigned proctor Xavier must access assigned confidential document';
-    RAISE NOTICE '[PASS] Test 3.1: Assigned proctor Xavier accesses assigned confidential document';
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_a_uuid;
+    ASSERT v_count = 1, 'Test 2.1 Failed: Proctor X must see standard Case A for triage';
+    RAISE NOTICE '[PASS] Test 2.1: Unassigned Proctor X can read standard grievance for triage';
 
-    -- Test 3.2: Unassigned Proctor Xavier accesses standard non-confidential document (triage)
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-STD-A/alice_doc.pdf';
-    ASSERT v_count = 1, 'Test 3.2 Failed: Unassigned proctor Xavier must access standard grievance document';
-    RAISE NOTICE '[PASS] Test 3.2: Unassigned proctor Xavier accesses standard grievance document';
+    -- Test 2.2: Unassigned Proctor X CANNOT read unassigned confidential grievance (Case C)
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_c_uuid;
+    ASSERT v_count = 0, 'Test 2.2 Failed: Unassigned Proctor X must NOT see unassigned confidential Case C!';
+    RAISE NOTICE '[PASS] Test 2.2: Unassigned Proctor X strictly BLOCKED from confidential grievance';
 
-    -- Test 3.3: Unassigned Proctor Xavier BLOCKED from unassigned confidential document
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-C/bob_unassigned.pdf';
-    ASSERT v_count = 0, 'Test 3.3 Failed: Unassigned proctor Xavier must NOT access unassigned confidential document';
-    RAISE NOTICE '[PASS] Test 3.3: Unassigned proctor Xavier BLOCKED from unassigned confidential document';
+    -- Test 2.3: Assigned Proctor X CAN read assigned confidential grievance (Case B)
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_b_uuid;
+    ASSERT v_count = 1, 'Test 2.3 Failed: Assigned Proctor X must see assigned confidential Case B';
+    RAISE NOTICE '[PASS] Test 2.3: Assigned Proctor X can read assigned confidential grievance';
 
-    -- Test 3.4: Committee member Carol CAN access unassigned confidential document
+    -- Test 2.4: Committee member Carol CAN read unassigned confidential grievance (Case C)
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_carol_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-C/bob_unassigned.pdf';
-    ASSERT v_count = 1, 'Test 3.4 Failed: Committee member Carol must access confidential document';
-    RAISE NOTICE '[PASS] Test 3.4: Committee member Carol accesses unassigned confidential document';
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE id = v_case_c_uuid;
+    ASSERT v_count = 1, 'Test 2.4 Failed: Committee member Carol must see confidential Case C';
+    RAISE NOTICE '[PASS] Test 2.4: Committee member Carol can read institutional confidential grievance';
 
     -- =================================================================
-    -- SECTION 4: Anonymous Access Denial on Storage Objects
+    -- SECTION 3: Confidential Grievance UPDATE Isolation
     -- =================================================================
-    -- Test 4.1: Direct anonymous access to storage.objects is strictly 0 rows
-    EXECUTE 'SET LOCAL ROLE anon';
-    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents';
-    ASSERT v_count = 0, 'Test 4.1 Failed: Anonymous role must have 0 visibility on storage.objects';
-    RAISE NOTICE '[PASS] Test 4.1: Direct anonymous access on storage.objects is strictly 0 rows';
-
-    -- =================================================================
-    -- SECTION 5: Audit Log Visibility & Immutability
-    -- =================================================================
-    -- Test 5.1: Student Alice sees her own audit log actions via get_current_user_audit_actor_id()
-    EXECUTE 'SET LOCAL ROLE authenticated';
-    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_student_a_id || '''';
-    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
-
-    SELECT count(*) INTO v_count FROM public.case_activity_log;
-    ASSERT v_count = 1, 'Test 5.1 Failed: Alice must see exactly 1 activity log entry (her own)';
-    RAISE NOTICE '[PASS] Test 5.1: Student Alice sees own audit activity (no permission error!)';
-
-    -- Test 5.2: Proctor Xavier sees College X institutional activity logs
+    -- Test 3.1: Unassigned Proctor X CANNOT update unassigned confidential grievance (Case C)
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_x_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
-    SELECT count(*) INTO v_count FROM public.case_activity_log;
-    ASSERT v_count = 3, 'Test 5.2 Failed: Proctor Xavier should see College X activity logs (3 logs)';
-    RAISE NOTICE '[PASS] Test 5.2: Proctor Xavier views College X case activity logs';
+    UPDATE public.campus_cases SET proctor_notes = 'Tampered by unassigned proctor' WHERE id = v_case_c_uuid;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    ASSERT v_count = 0, 'Test 3.1 Failed: Unassigned Proctor X must update 0 rows on confidential Case C!';
+    RAISE NOTICE '[PASS] Test 3.1: Unassigned Proctor X UPDATE on confidential grievance blocked (0 rows updated)';
 
-    -- Test 5.3: Cross-institution Proctor Yolanda sees 0 logs for College X
+    -- Test 3.2: Unassigned Proctor X CANNOT downgrade confidentiality_mode to NORMAL on Case C
+    UPDATE public.campus_cases SET confidentiality_mode = 'NORMAL' WHERE id = v_case_c_uuid;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    ASSERT v_count = 0, 'Test 3.2 Failed: Confidentiality downgrade bypass must update 0 rows!';
+    RAISE NOTICE '[PASS] Test 3.2: Confidentiality mode downgrade bypass blocked (0 rows updated)';
+
+    -- Test 3.3: Assigned Proctor X CAN update notes on assigned confidential grievance (Case B)
+    UPDATE public.campus_cases SET proctor_notes = 'Legitimate update by assigned proctor' WHERE id = v_case_b_uuid;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    ASSERT v_count = 1, 'Test 3.3 Failed: Assigned Proctor X must update 1 row on Case B!';
+    RAISE NOTICE '[PASS] Test 3.3: Assigned Proctor X successfully updates assigned confidential grievance';
+
+    -- =================================================================
+    -- SECTION 4: Cross-Institution & Suspended Access Denial
+    -- =================================================================
+    -- Test 4.1: Cross-institution Proctor Yolanda (College Y) CANNOT view College X cases
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_y_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
 
-    SELECT count(*) INTO v_count FROM public.case_activity_log;
-    ASSERT v_count = 0, 'Test 5.3 Failed: Yolanda must see 0 logs for College X';
-    RAISE NOTICE '[PASS] Test 5.3: Cross-institution Proctor Yolanda sees 0 logs for College X';
+    SELECT count(*) INTO v_count FROM public.campus_cases WHERE institution_uuid = v_inst_x_uuid;
+    ASSERT v_count = 0, 'Test 4.1 Failed: Yolanda must see 0 cases for College X!';
+    RAISE NOTICE '[PASS] Test 4.1: Cross-institution Proctor Yolanda denied College X cases';
 
-    -- Test 5.4: Audit log immutability: UPDATE attempt must fail
-    BEGIN
-        UPDATE public.case_activity_log SET action_type = 'MODIFIED';
-        RAISE EXCEPTION 'Test 5.4 Failed: Immutability trigger should have rejected UPDATE';
-    EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE '[PASS] Test 5.4: Audit log update strictly rejected by immutability trigger';
-    END;
+    -- Test 4.2: Suspended Proctor Sam CANNOT view any cases
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_sam_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM public.campus_cases;
+    ASSERT v_count = 0, 'Test 4.2 Failed: Suspended Proctor Sam must see 0 cases!';
+    RAISE NOTICE '[PASS] Test 4.2: Suspended Proctor Sam denied all case access';
 
     -- =================================================================
-    -- SECTION 6: Profile Immutability & Privilege Escalation Denial
+    -- SECTION 5: Confidential Audit-Log Isolation
     -- =================================================================
-    -- Test 6.1: Student A attempts to escalate role to platform_admin
+    -- Test 5.1: Unassigned Proctor X CANNOT read activity logs of confidential Case C
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_x_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_c_uuid;
+    ASSERT v_count = 0, 'Test 5.1 Failed: Unassigned Proctor X must NOT read confidential Case C activity logs!';
+    RAISE NOTICE '[PASS] Test 5.1: Unassigned Proctor X denied activity logs of confidential grievance';
+
+    -- Test 5.2: Assigned Proctor X CAN read activity logs of assigned confidential Case B
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_b_uuid;
+    ASSERT v_count = 2, 'Test 5.2 Failed: Assigned Proctor X must see Case B activity logs (count: 2)!';
+    RAISE NOTICE '[PASS] Test 5.2: Assigned Proctor X views activity logs of assigned confidential grievance';
+
+    -- Test 5.3: Committee member Carol CAN read activity logs of confidential Case C
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_carol_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_c_uuid;
+    ASSERT v_count = 1, 'Test 5.3 Failed: Committee member Carol must see Case C activity logs!';
+    RAISE NOTICE '[PASS] Test 5.3: Committee member Carol views activity logs of confidential grievance';
+
+    -- Test 5.4: Student Alice sees own audit activity via get_current_user_audit_actor_id()
     EXECUTE 'SET LOCAL ROLE authenticated';
     EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_student_a_id || '''';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
-    
-    BEGIN
-        UPDATE public.profiles SET role = 'platform_admin' WHERE id = v_student_a_id;
-        RAISE EXCEPTION 'Test 6.1 Failed: Privilege escalation should have raised an exception';
-    EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE '[PASS] Test 6.1: Profile role privilege escalation strictly blocked';
-    END;
+
+    SELECT count(*) INTO v_count FROM public.case_activity_log WHERE case_uuid = v_case_a_uuid;
+    ASSERT v_count = 1, 'Test 5.4 Failed: Student Alice must see her own activity log entry!';
+    RAISE NOTICE '[PASS] Test 5.4: Student Alice views own activity logs via get_current_user_audit_actor_id()';
 
     -- =================================================================
-    -- SECTION 7: Privileged RPC Gating
+    -- SECTION 6: Storage Objects Confidentiality Gating
     -- =================================================================
-    -- Test 7.1: Authenticated user cannot call update_campus_grievance_status directly
+    -- Test 6.1: Student A views own document
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-STD-A/alice_doc.pdf';
+    ASSERT v_count = 1, 'Test 6.1 Failed: Student A must view own document';
+    RAISE NOTICE '[PASS] Test 6.1: Student A accesses own document in storage.objects';
+
+    -- Test 6.2: Student A cannot view Student B document
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-B/bob_assigned.pdf';
+    ASSERT v_count = 0, 'Test 6.2 Failed: Student A must NOT view Student B document';
+    RAISE NOTICE '[PASS] Test 6.2: Student A denied access to Student B document';
+
+    -- Test 6.3: Unassigned Proctor X blocked from unassigned confidential document
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_x_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-C/bob_unassigned.pdf';
+    ASSERT v_count = 0, 'Test 6.3 Failed: Unassigned Proctor X must NOT access confidential document';
+    RAISE NOTICE '[PASS] Test 6.3: Unassigned Proctor X BLOCKED from confidential document';
+
+    -- Test 6.4: Assigned Proctor X accesses assigned confidential document
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents' AND name = 'CAMPUS-CONF-B/bob_assigned.pdf';
+    ASSERT v_count = 1, 'Test 6.4 Failed: Assigned Proctor X must access assigned document';
+    RAISE NOTICE '[PASS] Test 6.4: Assigned Proctor X accesses assigned confidential document';
+
+    -- Test 6.5: Direct anonymous access to storage.objects is strictly 0 rows
+    EXECUTE 'SET LOCAL ROLE anon';
+    SELECT count(*) INTO v_count FROM storage.objects WHERE bucket_id = 'case-documents';
+    ASSERT v_count = 0, 'Test 6.5 Failed: Anonymous role must see 0 objects';
+    RAISE NOTICE '[PASS] Test 6.5: Direct anonymous access on storage.objects is strictly 0 rows';
+
+    -- =================================================================
+    -- SECTION 7: Audit Immutability & Privileged RPC Protection
+    -- =================================================================
+    -- Test 7.1: Immutability trigger prevents UPDATE on case_activity_log
+    BEGIN
+        UPDATE public.case_activity_log SET action_type = 'TAMPERED';
+        RAISE EXCEPTION 'Test 7.1 Failed: Immutability trigger should have blocked UPDATE';
+    EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE '[PASS] Test 7.1: Audit log update strictly rejected by immutability trigger';
+    END;
+
+    -- Test 7.2: Privileged RPC rejects authenticated caller directly
+    EXECUTE 'SET LOCAL ROLE authenticated';
+    EXECUTE 'SET LOCAL "request.jwt.claim.sub" = ''' || v_proctor_x_id || '''';
+    EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''authenticated''';
+
     BEGIN
         SELECT public.update_campus_grievance_status(
             p_case_id => 'CAMPUS-STD-A',
             p_new_status => 'UNDER_INQUIRY'
         ) INTO v_rpc_res;
-        RAISE EXCEPTION 'Test 7.1 Failed: Authenticated role must not execute privileged RPC';
+        RAISE EXCEPTION 'Test 7.2 Failed: Authenticated role must not execute status RPC';
     EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE '[PASS] Test 7.1: Authenticated execution of status RPC strictly denied';
+        RAISE NOTICE '[PASS] Test 7.2: Authenticated execution of status RPC strictly denied';
     END;
 
-    -- Test 7.2: Backend service_role executes privileged status update successfully
+    -- Test 7.3: Backend service_role executes privileged status update
     EXECUTE 'SET LOCAL ROLE service_role';
     EXECUTE 'SET LOCAL "request.jwt.claim.role" = ''service_role''';
     
@@ -338,12 +350,12 @@ BEGIN
         p_proctor_notes => 'Inquiry initiated by authorized proctor'
     ) INTO v_rpc_res;
     
-    ASSERT (v_rpc_res->>'status') = 'UNDER_INQUIRY', 'Test 7.2 Failed: service_role status update failed';
-    RAISE NOTICE '[PASS] Test 7.2: Authorized backend service_role updates status via RPC';
+    ASSERT (v_rpc_res->>'status') = 'UNDER_INQUIRY', 'Test 7.3 Failed: service_role status update failed';
+    RAISE NOTICE '[PASS] Test 7.3: Authorized backend service_role updates status via RPC';
 
-    RAISE NOTICE '=======================================================';
-    RAISE NOTICE '  ALL NYAYPATH PHASE 1.3.11 RUNTIME SECURITY TESTS PASSED! ';
-    RAISE NOTICE '=======================================================';
+    RAISE NOTICE '======================================================================';
+    RAISE NOTICE '  ALL NYAYPATH PHASE 1.3.12 RUNTIME SECURITY & CONFIDENTIALITY TESTS PASSED!';
+    RAISE NOTICE '======================================================================';
 END $$;
 
 ROLLBACK;

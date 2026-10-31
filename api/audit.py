@@ -110,9 +110,13 @@ def record_case_activity(
         trusted_role = actor_user.role.value if hasattr(actor_user.role, "value") else str(actor_user.role)
         audit_actor_id = get_or_create_audit_actor_id(actor_user.user_id, supabase_client=supabase_client)
 
-    # 2. Sanitize action_details to guarantee zero PII or credentials
+    # 2. Sanitize action_details to guarantee zero PII, credentials, or confidential complaint contents
     sanitized_details = dict(action_details or {})
-    for secret_key in ["password", "token", "verification_key", "tracking_key", "salt", "ip"]:
+    for secret_key in [
+        "password", "token", "verification_key", "tracking_key", "salt", "ip",
+        "student_name", "roll_number", "contact_email", "email", "phone",
+        "description", "complaint", "subject"
+    ]:
         sanitized_details.pop(secret_key, None)
 
     event_record = {
