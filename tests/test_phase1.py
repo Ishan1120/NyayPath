@@ -1552,9 +1552,354 @@ print("[Test 18.11] [Static Legal Audit] Bharatiya Sakshya Adhiniyam 2023 & Rete
 assert "Section 65B" not in mig_004_sql, "Migration 004 must NOT cite repealed Evidence Act Section 65B"
 print("  [PASS] [Static Legal Audit] BSA 2023 Section 63/65 evidence rules properly decoupled from general database retention.")
 
+# =====================================================================
+# SECTION 19: DUAL-PATHWAY STORAGE AUTHORIZATION & 7 SCENARIOS (TASK 7)
+# =====================================================================
+print("\n--- SECTION 19: DUAL-PATHWAY STORAGE AUTHORIZATION [Phase 1.3.7 - Task 7] ---")
+
+# Setup Mock Case in campus_proctor_manager local store
+mock_student_id = str(uuid.uuid4())
+mock_case_id = "CAMPUS-AUTH-77"
+mock_tracking_key = "SEC-7777AAAA8888BBBB9999CCCC0000DDDD"
+mock_tracking_hash = hash_verification_key(mock_tracking_key)
+
+test_case_record = {
+    "id": str(uuid.uuid4()),
+    "case_id": mock_case_id,
+    "case_type": "CAMPUS_GRIEVANCE",
+    "institution_id": "NIT_DURGAPUR",
+    "student_user_id": mock_student_id,
+    "assigned_proctor": "Dr. Assigned Proctor",
+    "supporting_documents": [
+        {"id": "doc_case77_01.pdf", "file_name": "evidence_01.pdf"},
+        "doc_case77_02.png"
+    ],
+    "verification_key_hash": mock_tracking_hash,
+    "status": "SUBMITTED"
+}
+
+# Inject into campus_proctor_manager cache
+campus_proctor_manager._local_case_cache[mock_case_id] = test_case_record
+
+doc_mgr = DocumentAccessManager()
+
+print("[Test 19.1] Scenario A: Authenticated Case Owner can access document")
+owner_token = create_access_token(AuthUser(
+    user_id=mock_student_id,
+    email="student@nit.edu",
+    role=UserRole.STUDENT,
+    institution_id="NIT_DURGAPUR"
+))
+res_owner = doc_mgr.generate_document_signed_url(
+    case_id=mock_case_id,
+    document_id="doc_case77_01.pdf",
+    auth_header=f"Bearer {owner_token}"
+)
+assert res_owner["access_type"] == "CASE_OWNER"
+assert "signed_url" in res_owner
+print("  [PASS] Authenticated case owner granted single-object signed URL.")
+
+print("[Test 19.2] Scenario B: Assigned Institutional Proctor can access document")
+assigned_proctor_token = create_access_token(AuthUser(
+    user_id=str(uuid.uuid4()),
+    email="assigned@nit.edu",
+    role=UserRole.PROCTOR,
+    institution_id="NIT_DURGAPUR",
+    name="Dr. Assigned Proctor"
+))
+res_assigned = doc_mgr.generate_document_signed_url(
+    case_id=mock_case_id,
+    document_id="doc_case77_01.pdf",
+    auth_header=f"Bearer {assigned_proctor_token}"
+)
+assert res_assigned["access_type"] == "ASSIGNED_PROCTOR"
+print("  [PASS] Assigned institutional proctor granted document access.")
+
+print("[Test 19.3] Scenario C: Unassigned Proctor in same institution can access document")
+unassigned_proctor_token = create_access_token(AuthUser(
+    user_id=str(uuid.uuid4()),
+    email="unassigned@nit.edu",
+    role=UserRole.PROCTOR,
+    institution_id="NIT_DURGAPUR",
+    name="Dr. Other Proctor"
+))
+res_unassigned = doc_mgr.generate_document_signed_url(
+    case_id=mock_case_id,
+    document_id="doc_case77_01.pdf",
+    auth_header=f"Bearer {unassigned_proctor_token}"
+)
+assert res_unassigned["access_type"] == "UNASSIGNED_INSTITUTION_PROCTOR"
+print("  [PASS] Unassigned proctor in same institution granted institutional review access.")
+
+print("[Test 19.4] Scenario D: Cross-Institution Proctor is strictly rejected (403)")
+cross_proctor_token = create_access_token(AuthUser(
+    user_id=str(uuid.uuid4()),
+    email="proctor@iit.edu",
+    role=UserRole.PROCTOR,
+    institution_id="IIT_KANPUR",
+    name="Dr. Cross Inst"
+))
+try:
+    doc_mgr.generate_document_signed_url(
+        case_id=mock_case_id,
+        document_id="doc_case77_01.pdf",
+        auth_header=f"Bearer {cross_proctor_token}"
+    )
+    assert False, "Cross-institution access should have been rejected"
+except HTTPException as e:
+    assert e.status_code == 403
+    assert "Cross-institution" in e.detail
+print("  [PASS] Cross-institution proctor access strictly blocked with 403 Forbidden.")
+
+print("[Test 19.5] Scenario E: Anonymous Student with valid tracking key can access document")
+res_anon_valid = doc_mgr.generate_document_signed_url(
+    case_id=mock_case_id,
+    document_id="doc_case77_01.pdf",
+    tracking_key=mock_tracking_key,
+    client_ip="10.0.0.1"
+)
+assert res_anon_valid["access_type"] == "ANONYMOUS_VERIFIED"
+print("  [PASS] Anonymous student with valid tracking key granted document access.")
+
+print("[Test 19.6] Scenario F: Anonymous Student with invalid tracking key is rejected (403)")
+try:
+    doc_mgr.generate_document_signed_url(
+        case_id=mock_case_id,
+        document_id="doc_case77_01.pdf",
+        tracking_key="SEC-INVALID-KEY-0000000000000000000",
+        client_ip="10.0.0.2"
+    )
+    assert False, "Invalid tracking key should have been rejected"
+except HTTPException as e:
+    assert e.status_code == 403
+print("  [PASS] Anonymous student with invalid tracking key rejected with 403 Forbidden.")
+
+print("[Test 19.7] Scenario G: Document belonging to different case is rejected (404/403)")
+try:
+    doc_mgr.generate_document_signed_url(
+        case_id=mock_case_id,
+        document_id="OTHER-CASE/confidential_file.pdf",
+        auth_header=f"Bearer {assigned_proctor_token}"
+    )
+    assert False, "Different case document should have been rejected"
+except HTTPException as e:
+    assert e.status_code in (403, 404)
+try:
+    doc_mgr.generate_document_signed_url(
+        case_id=mock_case_id,
+        document_id="unregistered_evidence.pdf",
+        auth_header=f"Bearer {assigned_proctor_token}"
+    )
+    assert False, "Unregistered document should have been rejected"
+except HTTPException as e:
+    assert e.status_code in (403, 404)
+print("  [PASS] Documents belonging to different cases or unassociated with case strictly rejected.")
+
+# =====================================================================
+# SECTION 20: CROSS-CASE-TYPE ISOLATION & ATOMIC RPC CONCURRENCY (TASK 1 & TASK 4)
+# =====================================================================
+print("\n--- SECTION 20: CROSS-CASE-TYPE ISOLATION & ATOMIC RPC [Phase 1.3.7 - Task 1 & 4] ---")
+
+print("[Test 20.1] [Static SQL Inspection] Strict case_type = 'CAMPUS_GRIEVANCE' & FOR UPDATE Row Lock")
+rpc_sql = mig_004_sql.split("CREATE OR REPLACE FUNCTION public.update_campus_grievance_status")[1].split("$$;")[0]
+assert "WHERE case_id = p_case_id" in rpc_sql and "FOR UPDATE" in rpc_sql, "Must lock parent row with FOR UPDATE"
+assert "case_type mismatch" in rpc_sql, "Must raise explicit exception on case_type mismatch"
+print("  [PASS] [Static SQL Inspection] RPC locks parent row and enforces case_type = 'CAMPUS_GRIEVANCE'.")
+
+print("[Test 20.2] [Static SQL Inspection] Exact single-child row update check (ROW_COUNT = 1)")
+assert "v_child_updated_count <> 1" in rpc_sql, "RPC must check that exactly one child row was updated"
+assert "Atomic update violation" in rpc_sql, "RPC must raise exception to abort transaction on row count mismatch"
+print("  [PASS] [Static SQL Inspection] Child update row count verified; rollback triggered on mismatch.")
+
+print("[Test 20.3] [Static SQL Inspection] Fail-closed role check (NULL/non-service_role rejected)")
+assert "COALESCE(current_setting('request.jwt.claim.role', true), '') <> 'service_role'" in rpc_sql, (
+    "RPC must fail-closed if role claim is NULL or non-service_role"
+)
+print("  [PASS] [Static SQL Inspection] Fail-closed role check rejects null or unauthorized callers.")
+
+print("[Test 20.4] [Static SQL Inspection] Response allowlist strictly excludes tracking hashes & student PII")
+assert "jsonb_build_object" in rpc_sql, "RPC must construct explicit allowlist response"
+assert "tracking_key_hash" not in rpc_sql.split("jsonb_build_object")[1], "RPC response must exclude tracking_key_hash"
+assert "student_name" not in rpc_sql.split("jsonb_build_object")[1], "RPC response must exclude student_name"
+assert "roll_number" not in rpc_sql.split("jsonb_build_object")[1], "RPC response must exclude roll_number"
+print("  [PASS] [Static SQL Inspection] Allowlisted response strictly shields credentials and identity PII.")
+
+print("[Test 20.5] [Static SQL Inspection] Typed DATE parameter for hearing_date")
+assert "p_hearing_date DATE DEFAULT NULL" in mig_004_sql, "RPC must use typed DATE parameter for hearing_date"
+print("  [PASS] [Static SQL Inspection] Typed DATE parameter verified.")
+
+print("[Test 20.6] [Unit/Simulation] Cross-Case-Type rejection on non-campus grievance")
+from api.campus_proctor import ProctorUpdateStatus
+
+class MockSupabaseWrongTypeClient:
+    def rpc(self, func_name, payload):
+        class _RpcCall:
+            def execute(self):
+                raise RuntimeError("Case RTI-1002-DEL is not a campus grievance (case_type mismatch: RTI)")
+        return _RpcCall()
+
+proctor_wrong_type_mgr = CampusProctorManager()
+proctor_wrong_type_mgr.supabase = MockSupabaseWrongTypeClient()
+proctor_wrong_type_mgr.use_supabase = True
+proctor_wrong_type_mgr._local_case_cache["RTI-1002-DEL"] = {
+    "id": str(uuid.uuid4()),
+    "case_id": "RTI-1002-DEL",
+    "case_type": "RTI",
+    "institution_id": "NIT_DURGAPUR",
+    "status": "SUBMITTED"
+}
+
+try:
+    proctor_wrong_type_mgr.update_case(
+        ProctorUpdateStatus(case_id="RTI-1002-DEL", new_status="UNDER_INQUIRY"),
+        proctor_user=AuthUser(
+            user_id=str(uuid.uuid4()),
+            email="proctor@nit.edu",
+            role=UserRole.PROCTOR,
+            institution_id="NIT_DURGAPUR"
+        )
+    )
+    assert False, "Should have rejected RTI case in campus update"
+except HTTPException as e:
+    assert e.status_code == 400
+    assert "Cross-case-type rejection" in e.detail
+print("  [PASS] Non-campus case (RTI) rejected with clear cross-case-type error.")
+
+print("[Test 20.7] [Unit] Workflow Status Transition State Machine")
+mock_resolved_case = {
+    "id": str(uuid.uuid4()),
+    "case_id": "CAMPUS-RESOLVED-01",
+    "institution_id": "NIT_DURGAPUR",
+    "status": "RESOLVED"
+}
+campus_proctor_manager._local_case_cache["CAMPUS-RESOLVED-01"] = mock_resolved_case
+try:
+    campus_proctor_manager.update_case(
+        ProctorUpdateStatus(case_id="CAMPUS-RESOLVED-01", new_status="SUBMITTED"),
+        proctor_user=AuthUser(
+            user_id=str(uuid.uuid4()),
+            email="proctor@nit.edu",
+            role=UserRole.PROCTOR,
+            institution_id="NIT_DURGAPUR"
+        )
+    )
+    assert False, "Should have rejected illegal transition from RESOLVED to SUBMITTED"
+except HTTPException as e:
+    assert e.status_code == 400
+    assert "Invalid status transition" in e.detail
+print("  [PASS] State machine rejects illegal backwards status transitions (RESOLVED -> SUBMITTED).")
+
+# =====================================================================
+# SECTION 21: AUDIT ACTOR INTEGRITY & CONSTRAINTS (TASK 5)
+# =====================================================================
+print("\n--- SECTION 21: AUDIT ACTOR CONSTRAINTS & ERASURE [Phase 1.3.7 - Task 5] ---")
+
+print("[Test 21.1] [Static SQL Inspection] Constraint chk_audit_actor_integrity on case_activity_log")
+activity_log_sql = mig_004_sql.split("CREATE TABLE IF NOT EXISTS public.case_activity_log")[1].split(");")[0]
+assert "chk_audit_actor_integrity" in activity_log_sql, "Table must define chk_audit_actor_integrity constraint"
+assert "(actor_type = 'USER' AND audit_actor_id IS NOT NULL)" in activity_log_sql
+assert "(actor_type IN ('SYSTEM', 'ANONYMOUS') AND audit_actor_id IS NULL)" in activity_log_sql
+print("  [PASS] [Static SQL Inspection] chk_audit_actor_integrity enforces provenance requirements.")
+
+print("[Test 21.2] [Unit] Provenance verification: SYSTEM and ANONYMOUS have NULL audit_actor_id")
+system_event = record_case_activity(
+    case_uuid=str(uuid.uuid4()),
+    case_id="CAMPUS-SYS-01",
+    action_type="SLA_MONITOR_SCAN",
+    action_details={"check": "overdue_escalation"},
+    actor_type="SYSTEM"
+)
+assert system_event["actor_type"] == "SYSTEM"
+assert system_event["audit_actor_id"] is None, "SYSTEM actions must have NULL audit_actor_id"
+
+anon_event = record_case_activity(
+    case_uuid=str(uuid.uuid4()),
+    case_id="CAMPUS-ANON-01",
+    action_type="EVIDENCE_UPLOAD",
+    action_details={"file_name": "receipt.pdf"},
+    actor_type="ANONYMOUS"
+)
+assert anon_event["actor_type"] == "ANONYMOUS"
+assert anon_event["audit_actor_id"] is None, "ANONYMOUS actions must have NULL audit_actor_id"
+
+user_event = record_case_activity(
+    case_uuid=str(uuid.uuid4()),
+    case_id="CAMPUS-USER-01",
+    action_type="NOTE_ADDED",
+    action_details={"note": "Reviewed by committee"},
+    actor_user=AuthUser(
+        user_id=str(uuid.uuid4()),
+        email="cm@nit.edu",
+        role=UserRole.COMMITTEE_MEMBER,
+        institution_id="NIT_DURGAPUR"
+    ),
+    actor_type="USER"
+)
+assert user_event["actor_type"] == "USER"
+assert user_event["audit_actor_id"] is not None, "USER actions must have valid pseudonymous audit_actor_id"
+print("  [PASS] Audit actor provenance constraints verified for SYSTEM, ANONYMOUS, and USER events.")
+
+# =====================================================================
+# SECTION 22: STRUCTURAL PDF METADATA STRIPPING & ENCRYPTION REJECTION (TASK 6)
+# =====================================================================
+print("\n--- SECTION 22: PDF SANITIZATION & METADATA ERASURE [Phase 1.3.7 - Task 6] ---")
+import io
+import pypdf
+from api.media_sanitizer import sanitize_pdf_metadata
+
+print("[Test 22.1] Create PDF with sensitive Document Info & XMP metadata")
+test_writer = pypdf.PdfWriter()
+test_writer.add_blank_page(width=100, height=100)
+test_writer.add_metadata({
+    "/Title": "Confidential Ragging Complaint",
+    "/Author": "Secret Student Rohit Verma",
+    "/Subject": "Hostel 3 Incident",
+    "/Keywords": "ragging, hostel, nit, confidential",
+    "/Creator": "Microsoft Word for Windows 11",
+    "/Producer": "Acrobat Distiller 21.0"
+})
+raw_pdf_buf = io.BytesIO()
+test_writer.write(raw_pdf_buf)
+raw_pdf_bytes = raw_pdf_buf.getvalue()
+
+raw_reader = pypdf.PdfReader(io.BytesIO(raw_pdf_bytes))
+assert raw_reader.metadata.get("/Author") == "Secret Student Rohit Verma"
+assert raw_reader.metadata.get("/Title") == "Confidential Ragging Complaint"
+print("  [PASS] Test PDF successfully created with sensitive author and creator metadata.")
+
+print("[Test 22.2] Sanitize PDF and verify structural removal of all metadata keys")
+sanitized_bytes = sanitize_pdf_metadata(raw_pdf_bytes)
+clean_reader = pypdf.PdfReader(io.BytesIO(sanitized_bytes))
+
+# Assert all sensitive metadata keys are completely stripped
+assert clean_reader.metadata.get("/Author") is None, "Author must be completely stripped"
+assert clean_reader.metadata.get("/Title") is None, "Title must be completely stripped"
+assert clean_reader.metadata.get("/Subject") is None, "Subject must be completely stripped"
+assert clean_reader.metadata.get("/Keywords") is None, "Keywords must be completely stripped"
+assert clean_reader.metadata.get("/Creator") is None, "Creator must be completely stripped"
+assert clean_reader.xmp_metadata is None, "XMP metadata stream must be completely erased"
+assert len(clean_reader.pages) == 1, "Page visual content must be preserved intact"
+print("  [PASS] All Document Info keys (/Title, /Author, /Subject, /Keywords, /Creator) and XMP streams stripped.")
+
+print("[Test 22.3] Reject encrypted / password-protected PDF files")
+enc_writer = pypdf.PdfWriter()
+enc_writer.add_blank_page(width=72, height=72)
+enc_writer.encrypt("secret_password_123")
+enc_buf = io.BytesIO()
+enc_writer.write(enc_buf)
+enc_pdf_bytes = enc_buf.getvalue()
+
+try:
+    sanitize_pdf_metadata(enc_pdf_bytes)
+    assert False, "Encrypted PDF should have been rejected"
+except ValueError as e:
+    assert "Encrypted or password-protected" in str(e)
+print("  [PASS] Encrypted/password-protected PDF rejected with clear error.")
+
 print("\n" + "=" * 70)
 print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 + 1.3.7 TESTS COMPLETED SUCCESSFULLY!")
 print("=" * 70 + "\n")
+
 
 
 

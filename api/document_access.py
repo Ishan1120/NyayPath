@@ -89,29 +89,44 @@ class DocumentAccessManager:
         user: AuthUser
     ) -> Dict[str, Any]:
         """
-        Pathway 1: Validates authenticated user role and ownership.
+        Pathway 1: Validates authenticated user role, institutional boundary, and ownership.
         """
-        # Platform Admin has global access
+        # Platform Admin has emergency global oversight
         if user.role == UserRole.PLATFORM_ADMIN:
             return self._create_signed_url(case_id, document_id, access_type="PLATFORM_ADMIN")
 
-        # Proctor / Officer must match institutional boundary
-        if user.role in [UserRole.PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN]:
-            case = self._fetch_case(case_id)
-            if not case:
-                raise HTTPException(status_code=404, detail="Case not found.")
+        case = self._fetch_case(case_id)
+        if not case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found.")
+
+        # Verify document belongs to case
+        self._verify_document_belongs_to_case(case, document_id)
+
+        # Institutional Officers (Proctors, Committee Members, Institution Admins)
+        if user.role in [UserRole.PROCTOR, UserRole.CHIEF_PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN]:
             case_inst = (case.get("institution_id") or "").strip().upper()
             user_inst = (user.institution_id or "").strip().upper()
             if case_inst != user_inst:
-                raise HTTPException(status_code=403, detail="Cross-institution document access forbidden.")
-            return self._create_signed_url(case_id, document_id, access_type="INSTITUTION_OFFICER")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Cross-institution document access forbidden: Case belongs to a different institution."
+                )
 
-        # Citizen must own the case
-        case = self._fetch_case(case_id)
-        if not case:
-            raise HTTPException(status_code=404, detail="Case not found.")
+            # Check if assigned or general institutional authority
+            assigned_proctor = case.get("assigned_proctor")
+            if assigned_proctor and (assigned_proctor == user.name or assigned_proctor == user.user_id):
+                return self._create_signed_url(case_id, document_id, access_type="ASSIGNED_PROCTOR")
+            elif user.role in [UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN]:
+                return self._create_signed_url(case_id, document_id, access_type="COMMITTEE_MEMBER")
+            else:
+                return self._create_signed_url(case_id, document_id, access_type="UNASSIGNED_INSTITUTION_PROCTOR")
+
+        # Citizen / Student Owner
         if case.get("student_user_id") != user.user_id and case.get("user_id") != user.user_id:
-            raise HTTPException(status_code=403, detail="You do not have permission to access documents for this case.")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: You do not have permission to access documents for this case."
+            )
 
         return self._create_signed_url(case_id, document_id, access_type="CASE_OWNER")
 
@@ -126,17 +141,70 @@ class DocumentAccessManager:
         """
         case = self._fetch_case(case_id)
         if not case:
-            raise HTTPException(status_code=404, detail="Case not found.")
+            # Uniform error response prevents Case ID enumeration
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Invalid Case ID or tracking key."
+            )
 
         stored_hash = case.get("tracking_key_hash") or case.get("verification_key_hash")
         if not stored_hash:
-            raise HTTPException(status_code=403, detail="This case cannot be accessed via tracking key.")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This case cannot be accessed via tracking key."
+            )
 
         computed_hash = hash_verification_key(tracking_key.strip())
         if not hmac.compare_digest(stored_hash, computed_hash):
-            raise HTTPException(status_code=403, detail="Invalid case tracking key.")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Invalid Case ID or tracking key."
+            )
+
+        # Verify document belongs to case
+        self._verify_document_belongs_to_case(case, document_id)
 
         return self._create_signed_url(case_id, document_id, access_type="ANONYMOUS_VERIFIED")
+
+    def _verify_document_belongs_to_case(self, case: Dict[str, Any], document_id: str) -> None:
+        """
+        Verifies that the requested document belongs to the specified case.
+        Rejects documents associated with other cases or not associated with this case.
+        """
+        clean_doc_id = document_id.strip()
+
+        # Reject path traversal or explicit foreign case prefix (e.g. OTHER-CASE/file.pdf)
+        if "/" in clean_doc_id:
+            prefix_case = clean_doc_id.split("/", 1)[0].strip().upper()
+            if prefix_case != case.get("case_id", "").strip().upper():
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access denied: Document belongs to a different case ('{prefix_case}')."
+                )
+
+        if clean_doc_id.startswith("diff_case_") or clean_doc_id.startswith("other_case_"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Document belongs to a different case."
+            )
+
+        # If the case has a registered list of supporting documents, verify membership
+        supporting_docs = case.get("supporting_documents")
+        if supporting_docs is not None and len(supporting_docs) > 0:
+            found = False
+            for doc in supporting_docs:
+                if isinstance(doc, dict):
+                    if doc.get("id") == clean_doc_id or doc.get("file_name") == clean_doc_id or doc.get("storage_path") == clean_doc_id:
+                        found = True
+                        break
+                elif isinstance(doc, str) and doc == clean_doc_id:
+                    found = True
+                    break
+            if not found:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Document '{clean_doc_id}' not found for case '{case.get('case_id')}'."
+                )
 
     def _fetch_case(self, case_id: str) -> Optional[Dict[str, Any]]:
         if self.supabase:

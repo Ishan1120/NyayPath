@@ -137,3 +137,4 @@ def record_case_activity(
 
     _LOCAL_ACTIVITY_LOGS.append(event_record)
     return event_record
+

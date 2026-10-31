@@ -986,7 +986,7 @@ def get_campus_case(
     user = get_current_user_optional(request)
 
     # 1. Proctor or administrative officer
-    if user and user.role in [UserRole.PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+    if user and user.role in [UserRole.PROCTOR, UserRole.CHIEF_PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
         case = campus_proctor_manager.get_case_for_proctor(case_id, user)
         return {"case": case}
 
@@ -1022,7 +1022,7 @@ def list_campus_cases(request: Request):
     Rejects unauthenticated users (401) and students (403).
     """
     user = get_current_authenticated_user(request)
-    if user.role not in [UserRole.PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+    if user.role not in [UserRole.PROCTOR, UserRole.CHIEF_PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
         raise HTTPException(
             status_code=403,
             detail="Access denied: Students are not permitted to access the proctorial inquiries queue."
@@ -1037,7 +1037,7 @@ def update_campus_case(payload: ProctorUpdateStatus, request: Request):
     Enforces that proctors can only modify cases belonging to their own institution.
     """
     user = get_current_authenticated_user(request)
-    if user.role not in [UserRole.PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+    if user.role not in [UserRole.PROCTOR, UserRole.CHIEF_PROCTOR, UserRole.COMMITTEE_MEMBER, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
         raise HTTPException(
             status_code=403,
             detail="Access denied: Only authorized proctors or committee members may update case statuses."

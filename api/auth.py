@@ -226,6 +226,7 @@ def compute_hmac_sha256(key_bytes: bytes, message_bytes: bytes) -> str:
 class UserRole(str, Enum):
     STUDENT = "student"
     PROCTOR = "proctor"
+    CHIEF_PROCTOR = "chief_proctor"
     COMMITTEE_MEMBER = "committee_member"
     INSTITUTION_ADMIN = "institution_admin"
     PLATFORM_ADMIN = "platform_admin"

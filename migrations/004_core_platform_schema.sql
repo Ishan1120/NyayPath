@@ -320,22 +320,27 @@ CREATE TRIGGER trg_sync_parent_case_update
     FOR EACH ROW EXECUTE FUNCTION private.sync_parent_case_to_campus();
 
 -- =====================================================================
--- 4. ATOMIC GRIEVANCE STATUS UPDATE RPC (Task 2)
+-- 4. ATOMIC GRIEVANCE STATUS UPDATE RPC (Phase 1.3.7 - Task 1 & Task 4)
 -- =====================================================================
 -- Executes parent and child status updates inside a single atomic database transaction.
--- Strictly restricted: EXECUTE granted ONLY to service_role; REVOKED from PUBLIC, anon, authenticated.
--- Runtime defense-in-depth: Checks auth.role() = 'service_role'.
+-- 1. Verifies case_type = 'CAMPUS_GRIEVANCE' and locks parent row (SELECT ... FOR UPDATE).
+-- 2. Strictly prevents modification of RTI, Consumer, or general cases.
+-- 3. Verifies child campus_cases record exists before updating.
+-- 4. Enforces single-child row update (ROW_COUNT = 1); rolls back completely on any mismatch.
+-- 5. Preserves existing child history without overwriting with empty arrays.
+-- 6. Returns strictly allowlisted non-sensitive workflow fields.
+-- 7. SECURITY DEFINER with SET search_path = '' and fail-closed service_role authorization.
 
 CREATE OR REPLACE FUNCTION public.update_campus_grievance_status(
     p_case_id VARCHAR(64),
     p_new_status VARCHAR(64),
     p_proctor_notes TEXT DEFAULT NULL,
-    p_hearing_date TEXT DEFAULT NULL,
+    p_hearing_date DATE DEFAULT NULL,
     p_action_taken TEXT DEFAULT NULL,
     p_resolution_details TEXT DEFAULT NULL,
     p_assigned_proctor TEXT DEFAULT NULL,
     p_assigned_committee TEXT DEFAULT NULL,
-    p_history JSONB DEFAULT '[]'::jsonb
+    p_history JSONB DEFAULT NULL
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -344,46 +349,84 @@ SET search_path = ''
 AS $$
 DECLARE
     v_case_uuid UUID;
+    v_actual_case_type VARCHAR(64);
     v_updated_at TIMESTAMPTZ := timezone('utc'::text, now());
+    v_child_updated_count INT;
     v_result JSONB;
 BEGIN
-    -- Runtime defense-in-depth check: reject any non-service_role caller
-    IF current_setting('request.jwt.claim.role', true) <> 'service_role' AND auth.role() <> 'service_role' THEN
+    -- Runtime defense-in-depth check: fail-closed role check (NULL claims or non-service_role rejected)
+    IF COALESCE(current_setting('request.jwt.claim.role', true), '') <> 'service_role'
+       AND COALESCE(auth.role(), '') <> 'service_role' THEN
         RAISE EXCEPTION 'Access denied: update_campus_grievance_status is restricted to backend service_role only.';
     END IF;
 
-    -- 1. Locate authoritative parent case
-    SELECT id INTO v_case_uuid
+    -- 1. Locate and lock authoritative parent case with explicit case_type check (Task 1)
+    SELECT id, case_type INTO v_case_uuid, v_actual_case_type
     FROM public.cases
-    WHERE case_id = p_case_id;
+    WHERE case_id = p_case_id
+    FOR UPDATE;
 
     IF NOT FOUND THEN
         RAISE EXCEPTION 'Case % not found', p_case_id;
     END IF;
 
-    -- 2. Update authoritative parent in public.cases
-    -- Triggers trg_sync_parent_case_update to synchronize status and updated_at to campus_cases
+    IF v_actual_case_type <> 'CAMPUS_GRIEVANCE' THEN
+        RAISE EXCEPTION 'Case % is not a campus grievance (case_type mismatch: %)', p_case_id, v_actual_case_type;
+    END IF;
+
+    -- 2. Verify child campus_cases record exists before updating (Task 1)
+    IF NOT EXISTS (
+        SELECT 1 FROM public.campus_cases cc WHERE cc.id = v_case_uuid FOR UPDATE
+    ) THEN
+        RAISE EXCEPTION 'Campus case record not found for parent case % (id: %)', p_case_id, v_case_uuid;
+    END IF;
+
+    -- 3. Update authoritative parent in public.cases
     UPDATE public.cases
     SET
         status = p_new_status,
         updated_at = v_updated_at
     WHERE id = v_case_uuid;
 
-    -- 3. Update campus-specific fields in public.campus_cases atomically
+    -- 4. Update campus-specific fields in public.campus_cases atomically (Task 4)
+    -- Preserves existing history; appends new history only when provided; uses typed hearing_date
     UPDATE public.campus_cases
     SET
         proctor_notes = COALESCE(p_proctor_notes, proctor_notes),
-        hearing_date = COALESCE(p_hearing_date, hearing_date),
+        hearing_date = CASE
+            WHEN p_hearing_date IS NOT NULL THEN p_hearing_date::text
+            ELSE hearing_date
+        END,
         action_taken = COALESCE(p_action_taken, action_taken),
         resolution_details = COALESCE(p_resolution_details, resolution_details),
         assigned_proctor = COALESCE(p_assigned_proctor, assigned_proctor),
         assigned_committee = COALESCE(p_assigned_committee, assigned_committee),
-        history = p_history
+        history = CASE
+            WHEN p_history IS NOT NULL AND jsonb_array_length(p_history) > 0 THEN
+                COALESCE(history, '[]'::jsonb) || p_history
+            ELSE history
+        END
     WHERE id = v_case_uuid;
 
-    -- 4. Retrieve and return the updated sanitized record
-    SELECT to_jsonb(cc) INTO v_result
+    GET DIAGNOSTICS v_child_updated_count = ROW_COUNT;
+    IF v_child_updated_count <> 1 THEN
+        RAISE EXCEPTION 'Atomic update violation: Expected exactly 1 child row updated, got %', v_child_updated_count;
+    END IF;
+
+    -- 5. Return strictly allowlisted non-sensitive workflow fields (Task 4)
+    SELECT jsonb_build_object(
+        'case_id', cc.case_id,
+        'status', c.status,
+        'updated_at', c.updated_at,
+        'proctor_notes', cc.proctor_notes,
+        'hearing_date', cc.hearing_date,
+        'action_taken', cc.action_taken,
+        'resolution_details', cc.resolution_details,
+        'assigned_proctor', cc.assigned_proctor,
+        'assigned_committee', cc.assigned_committee
+    ) INTO v_result
     FROM public.campus_cases cc
+    JOIN public.cases c ON c.id = cc.id
     WHERE cc.id = v_case_uuid;
 
     RETURN v_result;
@@ -391,11 +434,11 @@ END;
 $$;
 
 REVOKE ALL PRIVILEGES ON FUNCTION public.update_campus_grievance_status(
-    VARCHAR(64), VARCHAR(64), TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
+    VARCHAR(64), VARCHAR(64), TEXT, DATE, TEXT, TEXT, TEXT, TEXT, JSONB
 ) FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.update_campus_grievance_status(
-    VARCHAR(64), VARCHAR(64), TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
+    VARCHAR(64), VARCHAR(64), TEXT, DATE, TEXT, TEXT, TEXT, TEXT, JSONB
 ) TO service_role;
 
 -- =====================================================================
@@ -661,14 +704,18 @@ CREATE TABLE IF NOT EXISTS public.case_activity_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     case_uuid UUID NOT NULL REFERENCES public.cases(id) ON DELETE RESTRICT,
     case_id VARCHAR(64) NOT NULL,
-    audit_actor_id UUID, -- Nullable for SYSTEM and ANONYMOUS actions
+    audit_actor_id UUID, -- Nullable for SYSTEM and ANONYMOUS actions; required for USER
     actor_type VARCHAR(16) NOT NULL DEFAULT 'USER' CHECK (
         actor_type IN ('USER', 'SYSTEM', 'ANONYMOUS')
     ),
     actor_role VARCHAR(32) NOT NULL,
     action_type VARCHAR(64) NOT NULL,
     action_details JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now()),
+    CONSTRAINT chk_audit_actor_integrity CHECK (
+        (actor_type = 'USER' AND audit_actor_id IS NOT NULL) OR
+        (actor_type IN ('SYSTEM', 'ANONYMOUS') AND audit_actor_id IS NULL)
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_case_activity_case ON public.case_activity_log(case_id, created_at DESC);

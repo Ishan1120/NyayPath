@@ -27,6 +27,7 @@ try:
     from .auth import (
         AuthUser,
         UserRole,
+        AccountStatus,
         generate_secure_verification_key,
         hash_verification_key,
         verify_tracking_credential,
@@ -37,6 +38,7 @@ except ImportError:
     from auth import (
         AuthUser,
         UserRole,
+        AccountStatus,
         generate_secure_verification_key,
         hash_verification_key,
         verify_tracking_credential,
@@ -84,6 +86,38 @@ class StudentTrackingRequest(BaseModel):
     case_id: str
     verification_key: str
 
+# Permitted state machine transitions for campus grievances (Task 2 & 4)
+PERMITTED_STATUS_TRANSITIONS: Dict[str, set] = {
+    "SUBMITTED": {"UNDER_INQUIRY", "UNDER_REVIEW", "HEARING_SCHEDULED", "ACTION_TAKEN", "RESOLVED", "CLOSED"},
+    "UNDER_REVIEW": {"UNDER_INQUIRY", "HEARING_SCHEDULED", "ACTION_TAKEN", "RESOLVED", "CLOSED"},
+    "UNDER_INQUIRY": {"HEARING_SCHEDULED", "ACTION_TAKEN", "RESOLVED", "CLOSED"},
+    "HEARING_SCHEDULED": {"ACTION_TAKEN", "RESOLVED", "CLOSED", "UNDER_INQUIRY"},
+    "ACTION_TAKEN": {"RESOLVED", "CLOSED", "UNDER_INQUIRY"},
+    "RESOLVED": {"CLOSED"},
+    "CLOSED": set()  # Terminal state
+}
+
+def parse_and_validate_hearing_date(date_str: Optional[str]) -> Optional[str]:
+    """
+    Parses and validates hearing_date into standard ISO 'YYYY-MM-DD' format for PostgreSQL DATE.
+    Accepts ISO dates, standard date strings, or human-readable formats.
+    """
+    if not date_str or not date_str.strip():
+        return None
+    val = date_str.strip()
+    try:
+        from dateutil import parser
+        parsed_date = parser.parse(val, fuzzy=True).date()
+        return parsed_date.isoformat()
+    except Exception:
+        try:
+            return datetime.strptime(val[:10], "%Y-%m-%d").date().isoformat()
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid hearing_date format: '{val}'. Expected a valid calendar date (e.g. YYYY-MM-DD)."
+            )
+
 # =====================================================================
 # Persistent Storage Manager for Campus Cases (Remediated)
 # =====================================================================
@@ -103,6 +137,7 @@ class CampusProctorManager:
         self.use_supabase = bool(url and secret_key and create_client)
         self.supabase: Optional[Client] = None
         self._local_db_path = os.environ.get("CAMPUS_SQLITE_DB", "campus_cases_persistent.db")
+        self._local_case_cache: Dict[str, Any] = {}
 
         is_production = (
             os.environ.get("VERCEL") == "1" or
@@ -405,66 +440,160 @@ class CampusProctorManager:
         return cases
 
     # -----------------------------------------------------------------
-    # Proctor Dashboard: Update Status & Findings
+    # Proctor Dashboard: Update Status & Findings (Phase 1.3.7 - Task 2, 3, 4)
     # -----------------------------------------------------------------
     def update_case(self, payload: ProctorUpdateStatus, proctor_user: AuthUser) -> Dict[str, Any]:
+        """
+        Executes an atomic workflow update for a campus grievance.
+        - Verifies initiating proctor token and authorized institutional role.
+        - Validates institutional boundary and active membership.
+        - Validates permitted workflow status transitions against state machine.
+        - Executes single atomic RPC (update_campus_grievance_status) with zero partial state.
+        - Records pseudonymous audit activity in case_activity_log under initiating proctor identity.
+        - Returns allowlisted, non-sensitive response payload.
+        """
+        if not proctor_user or getattr(proctor_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive or token is invalid."
+            )
+
+        authorized_roles = [
+            UserRole.PROCTOR,
+            UserRole.CHIEF_PROCTOR,
+            UserRole.COMMITTEE_MEMBER,
+            UserRole.INSTITUTION_ADMIN,
+            UserRole.PLATFORM_ADMIN
+        ]
+        if proctor_user.role not in authorized_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Only authorized proctors or committee members may update case statuses."
+            )
+
         clean_id = payload.case_id.strip().upper()
         case = self._fetch_raw_case(clean_id)
         if not case:
-            raise HTTPException(status_code=404, detail="Case not found.")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
 
+        # Institutional boundary enforcement
         verify_institutional_boundary(proctor_user, case.get("institution_id", "INST_DEFAULT"))
 
+        # In Supabase mode, verify active membership in institution_memberships
+        if self.use_supabase and self.supabase and proctor_user.role != UserRole.PLATFORM_ADMIN:
+            try:
+                res = self.supabase.table("institution_memberships").select("id, account_status, role").eq("user_id", proctor_user.user_id).eq("account_status", "active").execute()
+                if not res.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Forbidden: User lacks an active institutional membership in institution_memberships."
+                    )
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.warning(f"institution_memberships lookup exception (verifying via token context): {e}")
+
+        # Validate status transition state machine
+        current_status = (case.get("status") or "SUBMITTED").strip().upper()
+        new_status = payload.new_status.strip().upper()
+        if new_status != current_status:
+            allowed = PERMITTED_STATUS_TRANSITIONS.get(current_status, set())
+            if new_status not in allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid status transition from '{current_status}' to '{new_status}'. Allowed transitions: {sorted(list(allowed)) or 'None (terminal state)'}."
+                )
+
+        # Validate typed hearing_date if provided
+        validated_hearing_date = parse_and_validate_hearing_date(payload.hearing_date) if payload.hearing_date else None
         now_iso = datetime.now(timezone.utc).isoformat()
-        history = list(case.get("history") or [])
-        history.append({
-            "timestamp": now_iso,
-            "action": f"STATUS_UPDATED_TO_{payload.new_status}",
-            "actor": f"{proctor_user.name} ({proctor_user.role.value})",
-            "details": payload.proctor_notes or "Status updated by proctorial authority."
-        })
 
-        # Campus-specific fields (status is authoritatively owned by public.cases)
-        campus_updates = {
-            "proctor_notes": payload.proctor_notes if payload.proctor_notes is not None else case.get("proctor_notes"),
-            "hearing_date": payload.hearing_date if payload.hearing_date is not None else case.get("hearing_date"),
-            "action_taken": payload.action_taken if payload.action_taken is not None else case.get("action_taken"),
-            "resolution_details": payload.resolution_details if payload.resolution_details is not None else case.get("resolution_details"),
-            "assigned_proctor": payload.assigned_proctor if payload.assigned_proctor is not None else case.get("assigned_proctor"),
-            "assigned_committee": payload.assigned_committee if payload.assigned_committee is not None else case.get("assigned_committee"),
-            "history": history,
-            "updated_at": now_iso
-        }
-
+        # Database Update via Single Atomic RPC
         if self.use_supabase and self.supabase:
             try:
-                # Task 2: Single atomic database transaction via restricted service_role RPC
                 rpc_payload = {
                     "p_case_id": clean_id,
-                    "p_new_status": payload.new_status,
+                    "p_new_status": new_status,
                     "p_proctor_notes": payload.proctor_notes,
-                    "p_hearing_date": payload.hearing_date,
+                    "p_hearing_date": validated_hearing_date,
                     "p_action_taken": payload.action_taken,
                     "p_resolution_details": payload.resolution_details,
                     "p_assigned_proctor": payload.assigned_proctor,
                     "p_assigned_committee": payload.assigned_committee,
-                    "p_history": history
+                    "p_history": None  # Preserves existing history; does not bloat child table
                 }
                 res = self.supabase.rpc("update_campus_grievance_status", rpc_payload).execute()
                 if not res.data:
-                    raise RuntimeError("Atomic grievance update returned empty response.")
-                case = res.data
+                    raise RuntimeError("Atomic grievance update RPC returned empty data.")
+                updated_record = res.data
             except Exception as e:
-                logger.error(f"Atomic UPDATE Error in campus_proctor: {e}")
-                raise HTTPException(status_code=500, detail="Database update failed.")
+                err_msg = str(e)
+                logger.error(f"Atomic update_campus_grievance_status RPC failure: {err_msg}")
+                if "is not a campus grievance" in err_msg:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Cross-case-type rejection: {err_msg}"
+                    )
+                if "Case" in err_msg and "not found" in err_msg:
+                    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=err_msg)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Database atomic update failed: {err_msg}"
+                )
         else:
-            case["status"] = payload.new_status
-            case.update(campus_updates)
+            # Local dev fallback
+            case["status"] = new_status
+            if payload.proctor_notes is not None:
+                case["proctor_notes"] = payload.proctor_notes
+            if validated_hearing_date is not None:
+                case["hearing_date"] = validated_hearing_date
+            if payload.action_taken is not None:
+                case["action_taken"] = payload.action_taken
+            if payload.resolution_details is not None:
+                case["resolution_details"] = payload.resolution_details
+            if payload.assigned_proctor is not None:
+                case["assigned_proctor"] = payload.assigned_proctor
+            if payload.assigned_committee is not None:
+                case["assigned_committee"] = payload.assigned_committee
+            case["updated_at"] = now_iso
             self._update_record_sqlite(case)
+            updated_record = case
 
-        sanitized = dict(case)
-        sanitized.pop("verification_key_hash", None)
-        return sanitized
+        # Append audit activity log with genuine proctor identity (pseudonymized audit_actor_id)
+        try:
+            from .audit import record_case_activity
+        except ImportError:
+            from audit import record_case_activity
+
+        record_case_activity(
+            case_uuid=case.get("id"),
+            case_id=clean_id,
+            action_type=f"STATUS_TRANSITION_{new_status}",
+            action_details={
+                "from_status": current_status,
+                "to_status": new_status,
+                "proctor_notes": payload.proctor_notes,
+                "hearing_date": validated_hearing_date,
+                "assigned_proctor": payload.assigned_proctor,
+                "assigned_committee": payload.assigned_committee
+            },
+            actor_user=proctor_user,
+            actor_type="USER",
+            supabase_client=self.supabase
+        )
+
+        # Return strictly allowlisted non-sensitive fields
+        return {
+            "case_id": updated_record.get("case_id", clean_id),
+            "status": updated_record.get("status", new_status),
+            "updated_at": updated_record.get("updated_at", now_iso),
+            "proctor_notes": updated_record.get("proctor_notes"),
+            "hearing_date": updated_record.get("hearing_date"),
+            "action_taken": updated_record.get("action_taken"),
+            "resolution_details": updated_record.get("resolution_details"),
+            "assigned_proctor": updated_record.get("assigned_proctor"),
+            "assigned_committee": updated_record.get("assigned_committee")
+        }
 
     # -----------------------------------------------------------------
     # Notice Generator
@@ -533,6 +662,8 @@ Campus Grievance Redressal Committee (SGRC)
     # -----------------------------------------------------------------
     def _fetch_raw_case(self, case_id: str) -> Optional[Dict[str, Any]]:
         self._ensure_connected()
+        if hasattr(self, "_local_case_cache") and case_id in self._local_case_cache:
+            return self._local_case_cache[case_id]
         if self.use_supabase and self.supabase:
             try:
                 res = self.supabase.table("campus_cases").select("*").eq("case_id", case_id).execute()

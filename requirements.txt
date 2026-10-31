@@ -8,3 +8,6 @@ httpx
 python-multipart
 supabase>=2.3.0
 requests
+pypdf>=6.0.0
+pillow>=10.0.0
+
