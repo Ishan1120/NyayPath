@@ -14,6 +14,7 @@ Key Security & Reliability Guarantees:
 
 import os
 import uuid
+import secrets
 import logging
 from enum import Enum
 from datetime import datetime, timezone
@@ -140,9 +141,9 @@ class NotificationManager:
         now_iso = datetime.now(timezone.utc).isoformat()
         notif_id = str(uuid.uuid4())
 
-        # Auto-generate idempotency key if omitted
+        # Auto-generate unique high-entropy idempotency key if omitted
         if not idempotency_key:
-            idempotency_key = f"{clean_recipient}_{event_type}_{related_case_id}_{hash(title)}"
+            idempotency_key = f"notif_{clean_recipient}_{event_type}_{related_case_id}_{secrets.token_hex(8)}"
 
         # Default action_url to case details if omitted
         if not action_url and related_case_id:
@@ -209,10 +210,13 @@ class NotificationManager:
                     return record
                 logger.error(f"Failed to persist notification to Supabase: {e}")
                 if _is_production():
-                    # Log but do not crash the initiating business transaction
-                    pass
+                    # Log and fail closed in production without memory fallback
+                    return None
 
-        # 2. Local memory fallback for dev/testing
+        # 2. Local memory fallback for dev/testing only
+        if _is_production():
+            return None
+
         if idempotency_key in self._memory_notifications:
             return self._memory_notifications[idempotency_key]
 
@@ -233,6 +237,8 @@ class NotificationManager:
         Lists notifications strictly for the authenticated recipient user_id.
         """
         self._ensure_connected()
+        safe_limit = max(1, min(100, int(limit)))
+        safe_offset = max(0, int(offset))
         user_notifs: List[Dict[str, Any]] = []
 
         if self.use_supabase and self.supabase:
@@ -240,7 +246,7 @@ class NotificationManager:
                 query = self.supabase.table("notifications").select("*").eq("recipient_user_id", user_id).order("created_at", desc=True)
                 if is_read is not None:
                     query = query.eq("is_read", is_read)
-                query = query.limit(limit).offset(offset)
+                query = query.limit(safe_limit).offset(safe_offset)
                 res = query.execute()
 
                 # Get unread count
@@ -260,6 +266,12 @@ class NotificationManager:
                         detail="Failed to query notifications in production."
                     ) from e
 
+        if _is_production():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database notifications unavailable in production."
+            )
+
         # Dev / memory fallback
         for key, notif in self._memory_notifications.items():
             if notif.get("recipient_user_id") == user_id:
@@ -270,7 +282,7 @@ class NotificationManager:
         user_notifs = sorted(user_notifs, key=lambda x: x.get("created_at", ""), reverse=True)
         unread_count = sum(1 for n in user_notifs if not n.get("is_read"))
 
-        paginated = user_notifs[offset:offset + limit]
+        paginated = user_notifs[safe_offset:safe_offset + safe_limit]
         return {
             "notifications": paginated,
             "unread_count": unread_count,
@@ -286,6 +298,17 @@ class NotificationManager:
                 return res.count if res.count is not None else 0
             except Exception as e:
                 logger.warning(f"Error counting unread notifications: {e}")
+                if _is_production():
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Database notification count error in production."
+                    ) from e
+
+        if _is_production():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database notification count unavailable in production."
+            )
 
         # Fallback
         return sum(
@@ -326,7 +349,15 @@ class NotificationManager:
                 raise
             except Exception as e:
                 logger.error(f"Error updating notification read status: {e}")
+                if _is_production():
+                    raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database update error in production.") from e
                 raise HTTPException(status_code=500, detail="Database update error.") from e
+
+        if _is_production():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database notifications unavailable in production."
+            )
 
         # Memory fallback
         for key, notif in self._memory_notifications.items():
@@ -353,7 +384,15 @@ class NotificationManager:
                 return len(res.data or [])
             except Exception as e:
                 logger.error(f"Error marking all notifications as read: {e}")
+                if _is_production():
+                    raise HTTPException(status_code=503, detail="Database update error in production.") from e
                 return 0
+
+        if _is_production():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database notifications unavailable in production."
+            )
 
         # Memory fallback
         count = 0
@@ -386,7 +425,15 @@ class NotificationManager:
                 raise
             except Exception as e:
                 logger.error(f"Error deleting notification: {e}")
+                if _is_production():
+                    raise HTTPException(status_code=503, detail="Database error deleting notification.") from e
                 return False
+
+        if _is_production():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database notifications unavailable in production."
+            )
 
         # Memory fallback
         target_key = None

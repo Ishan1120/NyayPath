@@ -11,7 +11,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 
 import sys
@@ -132,8 +132,9 @@ app = FastAPI(title="NyayPath AI API", version="2.6")
 document_access_manager = DocumentAccessManager()
 
 # =====================================================================
-# CORS Configuration (Phase 1.3.4 — restricted from wildcard)
-# Origins: Next.js local dev only. No wildcard in any environment.
+# CORS Configuration (Phase 1.3.4 & Phase 3 — restricted from wildcard)
+# Origins: Next.js local dev + explicitly configured frontend origins.
+# No wildcard allowed in any environment.
 # allow_credentials=False: tokens are sent in Authorization headers,
 #   not as cookies, so SameSite credential flow is not required.
 # =====================================================================
@@ -141,6 +142,18 @@ _CORS_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
+_env_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_frontend_env = os.environ.get("FRONTEND_URL", "").strip()
+if _frontend_env and _frontend_env not in _CORS_ORIGINS and _frontend_env != "*":
+    _CORS_ORIGINS.append(_frontend_env)
+for _o in _env_origins:
+    if _o != "*" and _o not in _CORS_ORIGINS:
+        _CORS_ORIGINS.append(_o)
+
+def _is_production() -> bool:
+    env = os.environ.get("ENVIRONMENT", "").lower()
+    node_env = os.environ.get("NODE_ENV", "").lower()
+    return env in ("production", "prod") or node_env in ("production", "prod")
 
 app.add_middleware(
     CORSMiddleware,
@@ -154,12 +167,12 @@ app.include_router(intake_router)
 
 
 class ClarifyingQuestionsRequest(BaseModel):
-    problem_text: str
+    problem_text: str = Field(..., max_length=10000)
     language: Optional[str] = "English"
 
 class SynthesizeDraftRequest(BaseModel):
     case_id: Optional[str] = None
-    problem_text: str
+    problem_text: str = Field(..., max_length=10000)
     answers: Dict[str, str] = {}
     language: Optional[str] = "English"
     route: Optional[str] = "RTI"
@@ -840,9 +853,16 @@ def get_case_state(case_id: str):
 def debug_supabase(request: Request):
     """
     Restricted diagnostic endpoint.
-    Only accessible by authorized platform administrators or valid CRON_SECRET.
+    Disabled entirely in production (returns 404).
+    In non-production: Only accessible by authorized platform administrators or valid CRON_SECRET.
     Never exposes database URLs, credentials, or internal configuration.
     """
+    if _is_production():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Endpoint not found."
+        )
+
     cron_secret = os.environ.get("CRON_SECRET")
     auth_header = request.headers.get("Authorization", "")
     is_cron_authorized = bool(cron_secret and auth_header == f"Bearer {cron_secret}")
@@ -874,7 +894,7 @@ def fetch_court_news(category: str = "All", refresh: bool = False):
     return get_court_news(category, force_refresh=refresh)
 
 class PrecedentSearchRequest(BaseModel):
-    query: Optional[str] = ""
+    query: Optional[str] = Field("", max_length=1000)
     category: Optional[str] = "All"
 
 class PrecedentSummarizeRequest(BaseModel):
@@ -1477,16 +1497,20 @@ def delete_user_notification(notification_id: str, request: Request):
 # =====================================================================
 
 class CitationResolveRequest(BaseModel):
-    query: str
-    max_results: Optional[int] = 3
+    query: str = Field(..., min_length=1, max_length=1000)
+    max_results: Optional[int] = Field(3, ge=1, le=20)
 
 @app.post("/api/citations/resolve")
-def resolve_legal_citations(payload: CitationResolveRequest):
+def resolve_legal_citations(payload: CitationResolveRequest, request: Request):
     """
     Public/Authenticated endpoint: Resolves verified legal citations for a claim or legal issue.
     - Matches landmark Supreme Court, High Court, and statutory provisions.
     - Zero hallucination: Indicates clearly when no verified authority exists.
+    - Rate limited to prevent scraping/DoS.
     """
+    client_ip = request.client.host if request.client else "unknown"
+    enforce_rate_limit(request, action="citations", target_id=client_ip, max_attempts=30, window_seconds=60, cooldown_seconds=60)
+
     if not payload.query or not payload.query.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

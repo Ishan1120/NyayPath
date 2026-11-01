@@ -212,3 +212,4 @@ RESULTS: 12 PASSED, 0 FAILED
 | `app/case-search/page.tsx` | Modified | Added binding/persuasive authority badges and official source links |
 | `views/GrievanceResultView.tsx` | Modified | Integrated `LegalCitationsList` into grievance legal analysis view |
 | `lib/api.ts` | Modified | Added TypeScript interfaces and axios helper functions for citations & notifications |
+

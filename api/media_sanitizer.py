@@ -23,6 +23,7 @@ PLANNED FUTURE CAPABILITIES (Post-Phase 1):
 - Embedded font fingerprint scrubbing.
 """
 
+import os
 import io
 import re
 import logging
@@ -141,8 +142,12 @@ def sanitize_document_payload(
     High-level entry point to sanitize document bytes based on MIME type.
     Returns (sanitized_bytes, sanitized_file_name).
     """
-    # Sanitize file name to avoid path traversal or personal username leaks
-    safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", file_name)
+    # Sanitize file name to avoid path traversal, directory escape, or personal username leaks
+    base_name = os.path.basename(file_name or "").strip()
+    safe_name = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", base_name)
+    safe_name = safe_name.lstrip("._")
+    if not safe_name:
+        safe_name = "sanitized_document"
     
     clean_mime = mime_type.lower().strip()
     if clean_mime in ["image/jpeg", "image/jpg", "image/png", "image/webp"]:

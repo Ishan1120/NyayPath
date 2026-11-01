@@ -21,6 +21,27 @@ interface LegalCitationCardProps {
   compact?: boolean;
 }
 
+function isSafeUrl(url?: string | null): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function isOfficialGovSource(url?: string | null): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return host.endsWith('.gov.in') || host.endsWith('.nic.in') || host.endsWith('.judiciary.gov.in');
+  } catch {
+    return false;
+  }
+}
+
 export default function LegalCitationCard({ citation, compact = false }: LegalCitationCardProps) {
   const [copied, setCopied] = useState(false);
 
@@ -32,6 +53,10 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
   };
 
   const isBinding = citation.authority_type === 'BINDING';
+  const isHighCourt = !isBinding && citation.court && citation.court.toLowerCase().includes('high court');
+  const safeSourceUrl = isSafeUrl(citation.source_url) ? citation.source_url : null;
+  const isGov = isOfficialGovSource(safeSourceUrl);
+  const safePdfUrl = isSafeUrl(citation.pdf_download_url) ? citation.pdf_download_url : null;
 
   if (compact) {
     return (
@@ -44,7 +69,11 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
                 : 'bg-purple-50 text-purple-700 border border-purple-200'
             }`}
           >
-            {isBinding ? 'Binding Authority' : 'Persuasive Authority'}
+            {isBinding
+              ? 'Binding Authority'
+              : isHighCourt
+              ? 'High Court Precedent'
+              : 'Persuasive Authority'}
           </span>
           <span className="text-[11px] font-mono text-slate-400 font-medium">
             {citation.year || citation.citation}
@@ -57,7 +86,7 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
           </h4>
           <span className="text-[11px] text-slate-500 flex items-center gap-1 mt-0.5">
             <Building2 className="w-3 h-3 text-slate-400 shrink-0" />
-            <span className="truncate">{citation.court}</span>
+            <span className="truncate">{citation.court || 'Court jurisdiction unrecorded'}</span>
           </span>
         </div>
 
@@ -71,14 +100,14 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
             <span>{copied ? 'Copied' : 'Cite'}</span>
           </button>
 
-          {citation.source_url && (
+          {safeSourceUrl && (
             <a
-              href={citation.source_url}
+              href={safeSourceUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1"
             >
-              <span>Source</span>
+              <span>{isGov ? 'Official Record' : 'Repository'}</span>
               <ExternalLink className="w-3 h-3" />
             </a>
           )}
@@ -100,11 +129,17 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
             }`}
           >
             <ShieldCheck className="w-3 h-3" />
-            <span>{isBinding ? 'Binding Authority (Art. 141)' : 'Persuasive Precedent'}</span>
+            <span>
+              {isBinding
+                ? 'Binding Authority (Art. 141)'
+                : isHighCourt
+                ? 'Persuasive Precedent (State High Court)'
+                : 'Persuasive Precedent'}
+            </span>
           </span>
 
           <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
-            {citation.category}
+            {citation.category || 'General'}
           </span>
         </div>
 
@@ -121,7 +156,7 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
         <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 mt-1">
           <span className="flex items-center gap-1 font-medium">
             <Building2 className="w-3.5 h-3.5 text-slate-400" />
-            <span>{citation.court}</span>
+            <span>{citation.court || 'Court jurisdiction unrecorded'}</span>
           </span>
           {citation.year && (
             <>
@@ -132,12 +167,10 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
               </span>
             </>
           )}
-          {citation.bench && (
-            <>
-              <span>•</span>
-              <span className="truncate max-w-xs">{citation.bench}</span>
-            </>
-          )}
+          <span>•</span>
+          <span className="truncate max-w-xs text-slate-400">
+            {citation.bench || 'Bench details not recorded'}
+          </span>
         </div>
       </div>
 
@@ -147,7 +180,7 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
           Key Ratio Decidendi / Legal Principle
         </span>
         <p className="text-xs text-slate-700 leading-relaxed">
-          {citation.relevant_ratio}
+          {citation.relevant_ratio || 'No specific ratio excerpt available.'}
         </p>
       </div>
 
@@ -170,7 +203,7 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
       <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="text-xs text-slate-500 truncate max-w-sm">
           <span className="font-bold text-slate-700">Recommended Citation: </span>
-          <span className="font-mono text-[11px]">{citation.how_to_cite}</span>
+          <span className="font-mono text-[11px]">{citation.how_to_cite || citation.citation}</span>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
@@ -183,9 +216,9 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
             <span>{copied ? 'Copied' : 'Copy Citation'}</span>
           </button>
 
-          {citation.pdf_download_url && (
+          {safePdfUrl && (
             <a
-              href={citation.pdf_download_url}
+              href={safePdfUrl}
               download
               className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm"
             >
@@ -194,14 +227,18 @@ export default function LegalCitationCard({ citation, compact = false }: LegalCi
             </a>
           )}
 
-          {citation.source_url && (
+          {safeSourceUrl && (
             <a
-              href={citation.source_url}
+              href={safeSourceUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="px-3 py-1.5 rounded-xl bg-court-maroon hover:bg-rose-900 text-white text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm"
+              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-colors flex items-center gap-1.5 shadow-sm ${
+                isGov
+                  ? 'bg-court-maroon hover:bg-rose-900 text-white'
+                  : 'bg-slate-800 hover:bg-slate-900 text-white'
+              }`}
             >
-              <span>Official Source</span>
+              <span>{isGov ? 'Official Court Record (.gov.in)' : 'External Repository (IndianKanoon)'}</span>
               <ExternalLink className="w-3.5 h-3.5" />
             </a>
           )}
@@ -241,3 +278,4 @@ export function LegalCitationsList({
     </div>
   );
 }
+

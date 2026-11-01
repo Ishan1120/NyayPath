@@ -322,6 +322,8 @@ def get_request_scoped_supabase_client(user_jwt: Optional[str] = None):
     Guarantees no cross-request state contamination or token leakage
     between concurrent async FastAPI requests.
     Uses publishable anon key + request-specific Bearer token.
+    Only authentic Supabase-issued tokens (or test tokens) are forwarded to PostgREST.
+    Custom application-issued tokens (iss: nyaypath-auth) are not forwarded to PostgREST.
     """
     url = os.environ.get("SUPABASE_URL", "")
     pub_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "")
@@ -331,7 +333,18 @@ def get_request_scoped_supabase_client(user_jwt: Optional[str] = None):
         from supabase import create_client
         client = create_client(url, pub_key)
         if user_jwt:
-            client.postgrest.auth(user_jwt)
+            is_custom_app_token = False
+            try:
+                parts = user_jwt.strip().split(".")
+                if len(parts) == 3:
+                    p = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+                    if p.get("iss") == "nyaypath-auth":
+                        is_custom_app_token = True
+            except Exception:
+                pass
+
+            if not is_custom_app_token:
+                client.postgrest.auth(user_jwt)
         return client
     except Exception as e:
         logger.error(f"Failed to create request-scoped Supabase client: {e}")
@@ -529,18 +542,33 @@ def decode_supabase_access_token(
     - Cryptographically verifies the signature via verify_supabase_jwt.
     - Extracts app_metadata (role, institution_id, account_status).
     - Extracts user_metadata (full_name, email).
-    - Enforces account_status == 'active'.
+    - Strictly enforces account_status == 'active'.
+    - Validates presence of non-empty 'sub' UUID claim.
     """
     payload = verify_supabase_jwt(token, jwks_client=jwks_client)
     if not payload:
         return None
 
+    # Strictly enforce valid non-empty subject claim
+    sub = payload.get("sub")
+    if not sub or not isinstance(sub, str) or not sub.strip():
+        logger.warning("Rejected Supabase token: Missing or empty 'sub' claim.")
+        return None
+
     app_meta = payload.get("app_metadata") or {}
+    user_meta = payload.get("user_metadata") or {}
     raw_role = app_meta.get("role") or payload.get("role") or "student"
     raw_inst = app_meta.get("institution_id") or payload.get("institution_id") or "INST_DEFAULT"
-    raw_status = app_meta.get("account_status", "active")
+    raw_status = (
+        app_meta.get("account_status")
+        or payload.get("account_status")
+        or user_meta.get("account_status")
+        or "active"
+    ).strip().lower()
 
-    if raw_status in ["suspended", "revoked"]:
+    # Strictly enforce active account status (fail closed on suspended, revoked, disabled, etc.)
+    if raw_status != "active":
+        logger.warning(f"Rejected Supabase token: Account status is '{raw_status}'.")
         return None
 
     try:
@@ -548,21 +576,15 @@ def decode_supabase_access_token(
     except ValueError:
         role_enum = UserRole.STUDENT
 
-    try:
-        status_enum = AccountStatus(raw_status)
-    except ValueError:
-        status_enum = AccountStatus.ACTIVE
-
-    user_meta = payload.get("user_metadata") or {}
     exp = payload.get("exp", 0)
 
     return AuthUser(
-        user_id=payload.get("sub", "00000000-0000-0000-0000-000000000000"),
+        user_id=sub.strip(),
         role=role_enum,
         institution_id=raw_inst,
         name=user_meta.get("full_name") or payload.get("name") or "Authorized Officer",
         email=user_meta.get("email") or payload.get("email"),
-        account_status=status_enum,
+        account_status=AccountStatus.ACTIVE,
         exp=int(exp)
     )
 
@@ -573,10 +595,12 @@ def decode_access_token(token: str) -> Optional[AuthUser]:
     2. If token is signed via Supabase Auth (asymmetric ES256/RS256 or issuer points to Supabase),
        validates via decode_supabase_access_token.
     3. If token is an application JWT (HS256):
+       - Header validation: strictly enforces alg == 'HS256' (rejects 'none' or mismatched algorithms).
        - Signature verification against application JWT_SECRET.
-       - Enforces presence of 'exp' claim and verifies expiration.
-       - Rejects tampered tokens.
-       - Enforces account_status == 'active'.
+       - Enforces presence of valid numeric 'exp' claim and verifies expiration.
+       - Enforces presence of valid non-empty 'sub' claim.
+       - Enforces valid 'aud' claim ('authenticated' or 'nyaypath').
+       - Strictly enforces account_status == 'active'.
     """
     if not token or not isinstance(token, str):
         return None
@@ -603,6 +627,14 @@ def decode_access_token(token: str) -> Optional[AuthUser]:
         if len(parts) != 3:
             return None
         header_b64, payload_b64, sig_b64 = parts
+
+        # Verify header algorithm explicitly
+        header_bytes = _b64url_decode(header_b64)
+        header = json.loads(header_bytes.decode('utf-8'))
+        alg = header.get("alg")
+        if alg != "HS256":
+            logger.warning(f"Rejected token with unauthorized algorithm: {alg}")
+            return None
 
         # Verify Signature with application JWT_SECRET
         expected_sig = hmac.new(
@@ -638,14 +670,33 @@ def decode_access_token(token: str) -> Optional[AuthUser]:
         if exp < int(datetime.now(timezone.utc).timestamp()):
             return None
 
+        # Strictly enforce valid non-empty subject claim (no insecure fallback)
+        sub = payload.get("sub")
+        if not sub or not isinstance(sub, str) or not sub.strip():
+            logger.warning("Rejected token: Missing or empty 'sub' claim.")
+            return None
+
+        # Enforce aud claim if present
+        aud = payload.get("aud")
+        if aud and aud not in ["authenticated", "nyaypath"]:
+            logger.warning(f"Rejected token with unauthorized audience: {aud}")
+            return None
+
         # Extract app_metadata (Supabase standard)
         app_meta = payload.get("app_metadata") or {}
+        user_meta = payload.get("user_metadata") or {}
         raw_role = app_meta.get("role") or payload.get("role") or "student"
         raw_inst = app_meta.get("institution_id") or payload.get("institution_id") or "INST_DEFAULT"
-        raw_status = app_meta.get("account_status", "active")
+        raw_status = (
+            app_meta.get("account_status")
+            or payload.get("account_status")
+            or user_meta.get("account_status")
+            or "active"
+        ).strip().lower()
 
-        # Reject suspended or revoked accounts
-        if raw_status in ["suspended", "revoked"]:
+        # Strictly enforce active account status (fail closed on suspended, revoked, disabled, etc.)
+        if raw_status != "active":
+            logger.warning(f"Rejected token: Account status is '{raw_status}'.")
             return None
 
         try:
@@ -653,20 +704,15 @@ def decode_access_token(token: str) -> Optional[AuthUser]:
         except ValueError:
             role_enum = UserRole.STUDENT
 
-        try:
-            status_enum = AccountStatus(raw_status)
-        except ValueError:
-            status_enum = AccountStatus.ACTIVE
-
         user_meta = payload.get("user_metadata") or {}
 
         return AuthUser(
-            user_id=payload.get("sub", "00000000-0000-0000-0000-000000000000"),
+            user_id=sub.strip(),
             role=role_enum,
             institution_id=raw_inst,
             name=user_meta.get("full_name") or payload.get("name") or "Authorized Officer",
             email=user_meta.get("email") or payload.get("email"),
-            account_status=status_enum,
+            account_status=AccountStatus.ACTIVE,
             exp=int(exp)
         )
     except Exception:

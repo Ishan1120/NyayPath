@@ -12,10 +12,12 @@ Provides dedicated citizen-facing endpoints and logic for:
 """
 
 import os
+import re
 import math
 import uuid
 import secrets
 import hashlib
+import hmac
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
@@ -436,12 +438,35 @@ class CitizenWorkspaceManager:
                 detail=f"Unsupported document format '{clean_mime}'. Only PDF, JPEG, PNG, and WebP are allowed."
             )
 
+        # If case_id was provided, verify existence and ownership BEFORE uploading
+        raw_case = None
+        if case_id:
+            clean_case_id = case_id.strip().upper()
+            raw_case = self._fetch_single_raw_case(clean_case_id)
+            if not raw_case:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Case '{case_id}' not found."
+                )
+            owner_id = self._get_owner_id(raw_case)
+            if owner_id != user.user_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Cannot attach documents to a case you do not own."
+                )
+
         # Sanitize metadata (PDF doc info / XMP & Image EXIF)
         try:
             sanitized_bytes, safe_filename = sanitize_document_payload(file_bytes, filename, clean_mime)
         except Exception as e:
             logger.warning(f"Media sanitization error: {e}")
             sanitized_bytes, safe_filename = file_bytes, filename
+
+        # Ensure no path traversal in filename
+        safe_filename = os.path.basename(safe_filename or "").strip()
+        safe_filename = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", safe_filename).lstrip("._")
+        if not safe_filename:
+            safe_filename = "document"
 
         doc_id = str(uuid.uuid4())
         now_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -463,34 +488,25 @@ class CitizenWorkspaceManager:
                         detail="Failed to store document in secure storage."
                     ) from e
 
-        # If case_id was provided, verify ownership and register in case_documents table
-        if case_id:
-            raw_case = self._fetch_single_raw_case(case_id)
-            if raw_case:
-                owner_id = self._get_owner_id(raw_case)
-                if owner_id != user.user_id:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Access denied: Cannot attach documents to a case you do not own."
-                    )
-
-                case_uuid = raw_case.get("id") or str(uuid.uuid4())
-                if self.use_supabase and self.supabase:
-                    try:
-                        self.supabase.table("case_documents").insert({
-                            "id": doc_id,
-                            "case_uuid": case_uuid,
-                            "case_id": case_id,
-                            "file_name": safe_filename,
-                            "file_size_bytes": len(sanitized_bytes),
-                            "mime_type": clean_mime,
-                            "storage_path": storage_path,
-                            "uploader_user_id": user.user_id,
-                            "is_confidential": raw_case.get("is_confidential", False),
-                            "created_at": datetime.now(timezone.utc).isoformat()
-                        }).execute()
-                    except Exception as e:
-                        logger.warning(f"Error registering doc in case_documents table: {e}")
+        # If associated with verified case, register in case_documents table
+        if raw_case:
+            case_uuid = raw_case.get("id") or str(uuid.uuid4())
+            if self.use_supabase and self.supabase:
+                try:
+                    self.supabase.table("case_documents").insert({
+                        "id": doc_id,
+                        "case_uuid": case_uuid,
+                        "case_id": raw_case.get("case_id") or case_id,
+                        "file_name": safe_filename,
+                        "file_size_bytes": len(sanitized_bytes),
+                        "mime_type": clean_mime,
+                        "storage_path": storage_path,
+                        "uploader_user_id": user.user_id,
+                        "is_confidential": raw_case.get("is_confidential", False),
+                        "created_at": datetime.now(timezone.utc).isoformat()
+                    }).execute()
+                except Exception as e:
+                    logger.warning(f"Error registering doc in case_documents table: {e}")
 
         return {
             "document_id": doc_id,
@@ -751,7 +767,7 @@ class CitizenWorkspaceManager:
         elif verification_key and verification_key.strip():
             candidate_hash = hashlib.sha256(verification_key.strip().encode()).hexdigest()
             stored_hash = case.get("verification_key_hash") or case.get("tracking_key_hash")
-            if stored_hash and candidate_hash == stored_hash:
+            if stored_hash and hmac.compare_digest(candidate_hash, stored_hash):
                 authorized = True
 
         if not authorized:

@@ -184,3 +184,4 @@ INSERT INTO public.legal_precedents (
     'The Right to Life under Article 21 encompasses the right to clean drinking water and a contamination-free civic environment. Municipalities cannot evade their primary duty.'
 )
 ON CONFLICT (id) DO NOTHING;
+

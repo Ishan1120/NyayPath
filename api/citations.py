@@ -17,6 +17,7 @@ Key Guarantees:
 
 import re
 import logging
+from urllib.parse import urlparse
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,17 @@ except ImportError:
     from precedent_library import LANDMARK_PRECEDENTS, precedent_engine
 
 logger = logging.getLogger("nyaypath.citations")
+
+def is_safe_url(url: Optional[str]) -> bool:
+    """Validates that a URL is safe to open (valid HTTP/HTTPS scheme only, no dangerous protocols)."""
+    if not url or not isinstance(url, str):
+        return False
+    clean = url.strip()
+    try:
+        parsed = urlparse(clean)
+        return parsed.scheme in ["http", "https"] and bool(parsed.netloc)
+    except Exception:
+        return False
 
 # Official Repository URLs for authentic judgments
 OFFICIAL_SOURCE_URLS = {
@@ -103,7 +115,8 @@ def format_precedent_to_citation(item: Dict[str, Any]) -> CitationMetadata:
     hearing_date = item.get("hearing_date")
     year = extract_year_from_citation(citation_str, hearing_date)
 
-    source_url = OFFICIAL_SOURCE_URLS.get(item_id) or "https://main.sci.gov.in/"
+    raw_source = OFFICIAL_SOURCE_URLS.get(item_id) or item.get("official_source_url") or item.get("source_url") or "https://main.sci.gov.in/"
+    source_url = raw_source if is_safe_url(raw_source) else None
     pdf_url = f"/api/precedents/{item_id}/pdf" if item_id else None
 
     return CitationMetadata(
