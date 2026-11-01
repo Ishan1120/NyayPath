@@ -21,7 +21,8 @@ import {
   Calendar,
   ChevronDown,
   ChevronUp,
-  Download
+  Download,
+  ExternalLink
 } from 'lucide-react';
 import Navbar from '@/app/Navbar';
 import { searchPrecedents, summarizePrecedent, downloadCaseBriefPdf } from '@/lib/api';
@@ -296,6 +297,13 @@ export default function CaseSearchPage() {
                           <span>{item.relevance_label || `${item.relevance_score}% Match`}</span>
                         </span>
                       )}
+                      <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                        (item.court || '').includes('Supreme Court')
+                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          : 'bg-purple-50 text-purple-800 border border-purple-200'
+                      }`}>
+                        {(item.court || '').includes('Supreme Court') ? 'Binding Authority' : 'Persuasive Authority'}
+                      </span>
                       <span className="text-xs text-slate-400 font-bold">•</span>
                       <span className="text-xs font-bold text-slate-700 flex items-center gap-1">
                         <Building2 size={13} className="text-slate-400" />

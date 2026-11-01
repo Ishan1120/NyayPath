@@ -38,6 +38,14 @@ except ImportError:
     from audit import record_case_activity
 
 try:
+    from .notifications import notification_manager
+except ImportError:
+    try:
+        from notifications import notification_manager
+    except ImportError:
+        notification_manager = None
+
+try:
     from supabase import create_client, Client
 except ImportError:
     create_client, Client = None, None
@@ -368,6 +376,22 @@ class CitizenWorkspaceManager:
         }
         self._memory_cases[case_id] = mock_record
 
+        # Dispatch In-App Notification (Phase 2.3)
+        if notification_manager:
+            try:
+                notification_manager.create_notification(
+                    recipient_user_id=user.user_id,
+                    event_type="CASE_SUBMITTED",
+                    title="Case Registration Confirmed",
+                    message=f"Your case {case_id} has been registered under category '{norm_type}'.",
+                    related_case_id=case_id,
+                    case_uuid=case_uuid,
+                    action_url=f"/dashboard/my-cases/{case_id}",
+                    idempotency_key=f"notif_{user.user_id}_SUBMITTED_{case_id}"
+                )
+            except Exception as e_notif:
+                logger.warning(f"Failed to create case filing notification: {e_notif}")
+
         return {
             "case_id": case_id,
             "case_uuid": case_uuid,
@@ -560,6 +584,34 @@ class CitizenWorkspaceManager:
                 supabase_client=self.supabase
             )
 
+            # In-App Notification (Phase 2.3)
+            if notification_manager:
+                try:
+                    notification_manager.create_notification(
+                        recipient_user_id=user.user_id,
+                        event_type="CASE_WITHDRAWN",
+                        title="Case Withdrawal Confirmed",
+                        message=f"Case {clean_id} has been withdrawn and closed.",
+                        related_case_id=clean_id,
+                        case_uuid=case_uuid,
+                        action_url=f"/dashboard/my-cases/{clean_id}",
+                        idempotency_key=f"notif_{user.user_id}_WITHDRAWN_{clean_id}"
+                    )
+                    assigned_officer = case.get("assigned_proctor_user_id")
+                    if assigned_officer:
+                        notification_manager.create_notification(
+                            recipient_user_id=assigned_officer,
+                            event_type="CASE_WITHDRAWN",
+                            title="Assigned Case Withdrawn",
+                            message=f"Grievance {clean_id} has been withdrawn by applicant.",
+                            related_case_id=clean_id,
+                            case_uuid=case_uuid,
+                            action_url=f"/campus-proctor?case_id={clean_id}",
+                            idempotency_key=f"notif_{assigned_officer}_WITHDRAWN_{clean_id}"
+                        )
+                except Exception as e_notif:
+                    logger.warning(f"Failed to create withdrawal notification: {e_notif}")
+
             return {
                 "case_id": clean_id,
                 "action": "WITHDRAW",
@@ -591,6 +643,24 @@ class CitizenWorkspaceManager:
                 supabase_client=self.supabase
             )
 
+            # Officer In-App Notification (Phase 2.3)
+            if notification_manager:
+                try:
+                    assigned_officer = case.get("assigned_proctor_user_id")
+                    if assigned_officer:
+                        notification_manager.create_notification(
+                            recipient_user_id=assigned_officer,
+                            event_type="CITIZEN_REMARK_ADDED",
+                            title="Citizen Remark Added",
+                            message=f"Applicant posted a supplementary remark on case {clean_id}: {payload.remarks.strip()[:80]}",
+                            related_case_id=clean_id,
+                            case_uuid=case_uuid,
+                            action_url=f"/campus-proctor?case_id={clean_id}",
+                            idempotency_key=f"notif_{assigned_officer}_REMARK_{clean_id}_{int(datetime.now(timezone.utc).timestamp())}"
+                        )
+                except Exception as e_notif:
+                    logger.warning(f"Failed to create remark notification: {e_notif}")
+
             return {
                 "case_id": clean_id,
                 "action": "ADD_REMARK",
@@ -615,6 +685,24 @@ class CitizenWorkspaceManager:
                 actor_type="USER",
                 supabase_client=self.supabase
             )
+
+            # Officer In-App Notification (Phase 2.3)
+            if notification_manager:
+                try:
+                    assigned_officer = case.get("assigned_proctor_user_id")
+                    if assigned_officer:
+                        notification_manager.create_notification(
+                            recipient_user_id=assigned_officer,
+                            event_type="EXPEDITE_REQUESTED",
+                            title="Urgent Expedite Requested",
+                            message=f"Applicant requested expedited review for case {clean_id}.",
+                            related_case_id=clean_id,
+                            case_uuid=case_uuid,
+                            action_url=f"/campus-proctor?case_id={clean_id}",
+                            idempotency_key=f"notif_{assigned_officer}_EXPEDITE_{clean_id}_{int(datetime.now(timezone.utc).timestamp())}"
+                        )
+                except Exception as e_notif:
+                    logger.warning(f"Failed to create expedite notification: {e_notif}")
 
             return {
                 "case_id": clean_id,

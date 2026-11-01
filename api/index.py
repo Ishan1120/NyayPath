@@ -60,6 +60,8 @@ try:
         CaseLifecycleActionRequest,
         PublicCaseTrackingRequest
     )
+    from .notifications import notification_manager, MarkReadRequest
+    from .citations import resolve_citations_for_query
     from .rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from .auth import (
         AuthUser,
@@ -109,6 +111,8 @@ except ImportError:
         CaseLifecycleActionRequest,
         PublicCaseTrackingRequest
     )
+    from notifications import notification_manager, MarkReadRequest
+    from citations import resolve_citations_for_query
     from rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from auth import (
         AuthUser,
@@ -1395,5 +1399,103 @@ def track_citizen_case_get(case_id: str, request: Request, verification_key: Opt
         if e.status_code in (401, 403, 404):
             record_rate_limit_failure(request, action="track", target_id=case_key, max_attempts=10, window_seconds=900, cooldown_seconds=900)
         raise e
+
+
+# =====================================================================
+# Intelligent In-App Notification System Endpoints (Phase 2.3)
+# =====================================================================
+
+@app.get("/api/notifications")
+def get_user_notifications(
+    request: Request,
+    is_read: Optional[bool] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    Protected endpoint: Lists notifications strictly for the authenticated caller.
+    Returns notification items along with live unread count.
+    """
+    user = get_current_authenticated_user(request)
+    return notification_manager.list_user_notifications(
+        user_id=user.user_id,
+        is_read=is_read,
+        limit=limit,
+        offset=offset
+    )
+
+
+@app.get("/api/notifications/unread-count")
+def get_user_unread_notification_count(request: Request):
+    """
+    Protected endpoint: Lightweight unread notification counter for Navbar badge.
+    """
+    user = get_current_authenticated_user(request)
+    count = notification_manager.get_unread_count(user_id=user.user_id)
+    return {"unread_count": count}
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, request: Request):
+    """
+    Protected endpoint: Marks a single notification as read.
+    Strictly verifies ownership: Rejects modification of another user's notification with 403.
+    """
+    user = get_current_authenticated_user(request)
+    return notification_manager.mark_as_read(
+        notification_id=notification_id,
+        user_id=user.user_id
+    )
+
+
+@app.post("/api/notifications/mark-all-read")
+def mark_all_notifications_read(request: Request):
+    """
+    Protected endpoint: Marks all notifications as read for the authenticated caller.
+    """
+    user = get_current_authenticated_user(request)
+    updated_count = notification_manager.mark_all_as_read(user_id=user.user_id)
+    return {"status": "success", "marked_read_count": updated_count}
+
+
+@app.delete("/api/notifications/{notification_id}")
+def delete_user_notification(notification_id: str, request: Request):
+    """
+    Protected endpoint: Dismisses/deletes a single notification.
+    Strictly verifies ownership: Rejects deletion of another user's notification with 403.
+    """
+    user = get_current_authenticated_user(request)
+    success = notification_manager.delete_notification(
+        notification_id=notification_id,
+        user_id=user.user_id
+    )
+    return {"status": "success" if success else "failed"}
+
+
+# =====================================================================
+# Legal Citations Resolution Endpoint (Phase 2.3)
+# =====================================================================
+
+class CitationResolveRequest(BaseModel):
+    query: str
+    max_results: Optional[int] = 3
+
+@app.post("/api/citations/resolve")
+def resolve_legal_citations(payload: CitationResolveRequest):
+    """
+    Public/Authenticated endpoint: Resolves verified legal citations for a claim or legal issue.
+    - Matches landmark Supreme Court, High Court, and statutory provisions.
+    - Zero hallucination: Indicates clearly when no verified authority exists.
+    """
+    if not payload.query or not payload.query.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Query string cannot be empty."
+        )
+    return resolve_citations_for_query(
+        query=payload.query.strip(),
+        max_results=payload.max_results or 3
+    )
+
 
 

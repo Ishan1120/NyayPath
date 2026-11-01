@@ -1,5 +1,7 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { LegalCitationsList } from '@/components/LegalCitationCard';
+import { resolveLegalCitations, CitationMetadata } from '@/lib/api';
 import { motion } from 'framer-motion';
 import { Scale, ArrowRight, ArrowLeft, ShieldAlert, CheckCircle2, Globe, ExternalLink, AlertCircle, FileText, Landmark, Clock, BookOpen, Download, Copy, Printer, Check, RefreshCw, Activity } from 'lucide-react';
 import { useRouter } from 'next/navigation';
@@ -125,6 +127,23 @@ ${applicantName}
     statute_of_limitations = null,
   } = activeResult;
 
+  const [citations, setCitations] = useState<CitationMetadata[]>(activeResult?.citations || []);
+  const [citationsLoading, setCitationsLoading] = useState(false);
+
+  useEffect(() => {
+    if (citations.length === 0 && defaultProblem) {
+      setCitationsLoading(true);
+      resolveLegalCitations(defaultProblem, 3)
+        .then((data) => {
+          if (data && data.citations && data.citations.length > 0) {
+            setCitations(data.citations);
+          }
+        })
+        .catch(() => {})
+        .finally(() => setCitationsLoading(false));
+    }
+  }, [defaultProblem]);
+
   return (
     <div 
       className="min-h-screen flex flex-col items-center justify-center p-4 py-12 bg-cover bg-center bg-no-repeat relative font-sans tracking-tight"
@@ -196,6 +215,18 @@ ${applicantName}
                 <div className="bg-[#F8FAFC] p-5 sm:p-6 rounded-2xl border border-slate-200 text-sm text-ashoka-navy leading-relaxed whitespace-pre-line font-medium shadow-inner">
                   {evidence_analysis}
                 </div>
+              </div>
+
+              <div className="border-t border-slate-200 pt-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <Scale className="w-4 h-4 text-court-maroon" />
+                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Verified Judicial Precedents & Legal Citations</h3>
+                </div>
+                <LegalCitationsList
+                  citations={citations}
+                  hasCitations={citations.length > 0}
+                  emptyMessage="No binding judicial citations required for this administrative stage. Direct statutory provisions apply."
+                />
               </div>
 
               {(pecuniary_jurisdiction?.amount_parsed != null || (statute_of_limitations?.status && statute_of_limitations.status !== 'UNKNOWN' && statute_of_limitations.status !== 'NOT_APPLICABLE')) && (

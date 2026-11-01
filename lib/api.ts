@@ -232,6 +232,70 @@ export const trackCitizenCase = (caseId: string, verificationKey?: string) => {
   return api.get(url).then(r => r.data);
 };
 
+// =====================================================================
+// Intelligent In-App Notification System API (Phase 2.3)
+// =====================================================================
+
+export interface CaseNotification {
+  id: string;
+  recipient_user_id: string;
+  event_type: string;
+  title: string;
+  message: string;
+  related_case_id: string;
+  case_uuid?: string;
+  is_read: boolean;
+  action_url?: string;
+  created_at: string;
+  read_at?: string;
+  metadata?: Record<string, any>;
+}
+
+export const getUserNotifications = (params?: { is_read?: boolean; limit?: number; offset?: number }) => {
+  const query = new URLSearchParams();
+  if (params?.is_read !== undefined) query.set('is_read', String(params.is_read));
+  if (params?.limit) query.set('limit', String(params.limit));
+  if (params?.offset) query.set('offset', String(params.offset));
+  const qs = query.toString();
+  return api.get(`/api/notifications${qs ? `?${qs}` : ''}`).then(r => r.data);
+};
+
+export const getUnreadNotificationCount = () =>
+  api.get('/api/notifications/unread-count').then(r => r.data);
+
+export const markNotificationAsRead = (notificationId: string) =>
+  api.post(`/api/notifications/${encodeURIComponent(notificationId)}/read`).then(r => r.data);
+
+export const markAllNotificationsAsRead = () =>
+  api.post('/api/notifications/mark-all-read').then(r => r.data);
+
+export const deleteNotification = (notificationId: string) =>
+  api.delete(`/api/notifications/${encodeURIComponent(notificationId)}`).then(r => r.data);
+
+// =====================================================================
+// Legal Citations Resolution API (Phase 2.3)
+// =====================================================================
+
+export interface CitationMetadata {
+  source_identifier: string;
+  case_title: string;
+  court: string;
+  citation: string;
+  year?: number;
+  authority_type: 'BINDING' | 'PERSUASIVE';
+  bench?: string;
+  category: string;
+  statutory_provisions: string[];
+  relevant_ratio: string;
+  how_to_cite: string;
+  source_url?: string;
+  pdf_download_url?: string;
+  is_verified: boolean;
+}
+
+export const resolveLegalCitations = (query: string, maxResults: number = 3) =>
+  api.post('/api/citations/resolve', { query, max_results: maxResults }).then(r => r.data);
+
 export default api
 
 export const triggerBlobDownload = (blobData: Blob, filename: string) => {

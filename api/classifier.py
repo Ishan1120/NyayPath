@@ -177,6 +177,14 @@ def _fallback_pio_parser(text: str) -> Dict[str, str]:
 # INTAKE ROUTE CLASSIFIER
 # =====================================================================
 
+try:
+    from .citations import resolve_citations_for_query
+except ImportError:
+    try:
+        from citations import resolve_citations_for_query
+    except ImportError:
+        resolve_citations_for_query = None
+
 class RouteClassifier:
     def __init__(self):
         api_key = os.environ.get("GROQ_API_KEY")
@@ -389,6 +397,20 @@ class RouteClassifier:
         except Exception as e:
             print(f"[FACTS Triage] failed ({e}).")
             result["facts_analysis"] = None
+
+        # Verified Legal Citations Integration (Phase 2.3)
+        if resolve_citations_for_query is not None:
+            try:
+                cit_res = resolve_citations_for_query(user_text)
+                result["citations"] = [c.dict() for c in cit_res.citations]
+                result["has_citations"] = cit_res.has_citations
+            except Exception as e:
+                logger.warning(f"[Citations Resolve] failed: {e}")
+                result["citations"] = []
+                result["has_citations"] = False
+        else:
+            result["citations"] = []
+            result["has_citations"] = False
 
         return result
 

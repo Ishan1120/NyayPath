@@ -709,6 +709,64 @@ class CampusProctorManager:
             supabase_client=self.supabase
         )
 
+        # Dispatch In-App Notifications (Phase 2.3)
+        try:
+            from .notifications import notification_manager
+        except ImportError:
+            try:
+                from notifications import notification_manager
+            except ImportError:
+                notification_manager = None
+
+        if notification_manager:
+            try:
+                student_uid = case.get("student_user_id")
+                if student_uid:
+                    # Status Update Notification
+                    if new_status != current_status:
+                        stat_title = f"Case Status: {new_status.replace('_', ' ').title()}"
+                        stat_msg = f"Your case {clean_id} status has been updated to {new_status}."
+                        if payload.resolution_details:
+                            stat_msg += f" Resolution: {payload.resolution_details}"
+                        notification_manager.create_notification(
+                            recipient_user_id=student_uid,
+                            event_type=f"CASE_{new_status}",
+                            title=stat_title,
+                            message=stat_msg,
+                            related_case_id=clean_id,
+                            case_uuid=case.get("id"),
+                            action_url=f"/dashboard/my-cases/{clean_id}",
+                            idempotency_key=f"notif_{student_uid}_{new_status}_{clean_id}"
+                        )
+
+                    # Hearing Scheduled Notification
+                    if validated_hearing_date:
+                        notification_manager.create_notification(
+                            recipient_user_id=student_uid,
+                            event_type="HEARING_SCHEDULED",
+                            title="Inquiry Hearing Scheduled",
+                            message=f"A formal inquiry hearing for case {clean_id} has been scheduled for {validated_hearing_date}.",
+                            related_case_id=clean_id,
+                            case_uuid=case.get("id"),
+                            action_url=f"/dashboard/my-cases/{clean_id}",
+                            idempotency_key=f"notif_{student_uid}_HEARING_{clean_id}_{validated_hearing_date}"
+                        )
+
+                # Proctor Assigned Notification
+                if payload.assigned_proctor_user_id and payload.assigned_proctor_user_id != proctor_user.user_id:
+                    notification_manager.create_notification(
+                        recipient_user_id=payload.assigned_proctor_user_id,
+                        event_type="CASE_ASSIGNED",
+                        title="New Case Assigned to You",
+                        message=f"You have been assigned as the presiding officer for case {clean_id}.",
+                        related_case_id=clean_id,
+                        case_uuid=case.get("id"),
+                        action_url=f"/campus-proctor?case_id={clean_id}",
+                        idempotency_key=f"notif_{payload.assigned_proctor_user_id}_ASSIGNED_{clean_id}"
+                    )
+            except Exception as e_notif:
+                logger.warning(f"Error dispatching status update notifications: {e_notif}")
+
         # Return strictly allowlisted non-sensitive fields
         return {
             "case_id": updated_record.get("case_id", clean_id),
