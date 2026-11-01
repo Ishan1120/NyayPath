@@ -35,7 +35,7 @@ Migrations are located in `supabase/migrations/` and must be executed in this ex
 6. `20261101000002_notifications_hardening.sql` — Notification immutability triggers, least-privilege role grants.
 7. `20261101000003_lawyer_connect_schema.sql` — Lawyer profiles, verification states, consultation requests, case access grants.
 8. `20261101000004_messaging_and_meetings_schema.sql` — Secure conversations, messages, private attachments, meeting scheduler.
-9. `20261102000001_concurrent_meeting_exclusion.sql` — `btree_gist` extension, GiST exclusion constraint against overlapping meetings.
+9. `20261102000001_concurrent_meeting_exclusion.sql` — `btree_gist` extension, GiST exclusion constraint (`exclude_overlapping_confirmed_meetings`) on `consultation_meetings`.
 10. `20261102000002_platform_admin_schema.sql` — Platform admins table, audit logging, system metrics functions.
 
 ### 1.2 Remote Migration Execution
@@ -190,3 +190,4 @@ Execute these verifications immediately following a staging or production releas
 - [ ] **Platform Admin Verification:** Attempting platform admin operations without an active record in `public.platform_admins` returns `403 Forbidden`.
 - [ ] **Meeting Conflict:** Attempting to book two overlapping meetings with the same advocate returns `400 Bad Request`.
 - [ ] **Frontend Routes:** All 41 pages render cleanly without unhandled CSR bailouts.
+

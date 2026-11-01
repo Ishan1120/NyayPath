@@ -115,7 +115,7 @@ The database schema was validated by executing a clean database reset (`npx supa
 
 **Verification Results:**
 - Zero migration dependency errors or syntax conflicts.
-- `btree_gist` extension enabled and GiST exclusion constraint active on `lawyer_meetings`.
+- `btree_gist` extension enabled and GiST exclusion constraint (`exclude_overlapping_confirmed_meetings`) active on `consultation_meetings`.
 - RLS enabled across all 26 application tables with security definer functions using strict explicit search paths (`search_path = public, private, pg_temp`).
 
 ---
@@ -203,3 +203,4 @@ All 14 automated test suites covering every development phase were executed sequ
 
 ### Final Decision:
 **Option A: The NyayPath platform is locally integrated, fully regression-verified, and ready for controlled production deployment.**
+
