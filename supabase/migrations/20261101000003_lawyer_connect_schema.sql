@@ -254,3 +254,4 @@ REVOKE ALL PRIVILEGES ON FUNCTION public.admin_verify_lawyer(UUID, VARCHAR, TEXT
 GRANT EXECUTE ON FUNCTION public.admin_verify_lawyer(UUID, VARCHAR, TEXT) TO authenticated, service_role;
 
 NOTIFY pgrst, 'reload schema';
+

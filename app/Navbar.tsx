@@ -22,7 +22,9 @@ import {
   ExternalLink,
   FileText,
   AlertCircle,
-  Building
+  Building,
+  MessageSquare,
+  Calendar
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -199,8 +201,12 @@ export default function Navbar() {
   const navLinks = [
     { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { name: "My Cases", href: "/dashboard/my-cases", icon: Briefcase },
+    ...(isLoggedIn ? [{ name: "Messages", href: "/messages", icon: MessageSquare }] : []),
     { name: "Advocates", href: "/lawyers", icon: Scale },
-    ...(isLawyer ? [{ name: "Lawyer Desk", href: "/lawyer/dashboard", icon: Gavel }] : []),
+    ...(isLawyer ? [
+      { name: "Lawyer Desk", href: "/lawyer/dashboard", icon: Gavel },
+      { name: "Meetings", href: "/lawyer/meetings", icon: Calendar }
+    ] : []),
     { name: "College Proctor", href: "/campus-proctor", icon: GraduationCap },
     { name: "Institution", href: "/institution/dashboard", icon: Building },
     { name: "Case Search", href: "/case-search", icon: BookOpen },

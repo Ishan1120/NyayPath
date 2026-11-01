@@ -556,4 +556,185 @@ export const getLawyerSharedCases = () =>
 export const getLawyerDashboardStats = () =>
   api.get('/api/lawyer/dashboard-stats').then(r => r.data);
 
+// =====================================================================
+// Phase 6: Secure Messaging, Client Communication & Meeting Scheduling
+// =====================================================================
+
+export interface ConversationParticipant {
+  id: string;
+  conversation_id: string;
+  user_id: string;
+  participant_role: string;
+  participant_status: string;
+  last_read_at?: string | null;
+  full_name?: string;
+  email?: string;
+  avatar_url?: string;
+  user_role?: string;
+}
+
+export interface MessageAttachment {
+  id: string;
+  message_id: string;
+  storage_path: string;
+  file_name: string;
+  file_size_bytes: number;
+  mime_type: string;
+  download_url?: string;
+  expires_in?: number;
+  created_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  conversation_id: string;
+  sender_user_id: string;
+  message_body: string;
+  message_type: 'TEXT' | 'ATTACHMENT' | 'SYSTEM' | 'MEETING_LINK';
+  client_message_id?: string;
+  created_at: string;
+  sender_name?: string;
+  sender_role?: string;
+  attachments?: MessageAttachment[];
+}
+
+export interface Conversation {
+  id: string;
+  conversation_type: 'LAWYER_CITIZEN' | 'INSTITUTION_CASE' | 'GENERAL_CASE';
+  title?: string;
+  consultation_request_id?: string;
+  case_id?: string;
+  status: 'ACTIVE' | 'ARCHIVED' | 'CLOSED';
+  created_at: string;
+  updated_at: string;
+  last_message_at?: string;
+  last_message_preview?: string;
+  unread_count?: number;
+  participants?: ConversationParticipant[];
+  other_participant?: ConversationParticipant;
+}
+
+export interface ConsultationMeeting {
+  id: string;
+  consultation_request_id?: string;
+  case_id?: string;
+  citizen_user_id: string;
+  lawyer_user_id: string;
+  scheduled_start: string;
+  scheduled_end: string;
+  meeting_mode: 'ONLINE' | 'IN_PERSON' | 'PHONE';
+  status: 'REQUESTED' | 'CONFIRMED' | 'DECLINED' | 'RESCHEDULE_REQUESTED' | 'CANCELLED' | 'COMPLETED' | 'NO_SHOW';
+  agenda?: string;
+  online_meeting_url?: string | null;
+  location_details?: string | null;
+  phone_contact?: string | null;
+  notes?: string;
+  created_at: string;
+  updated_at: string;
+  citizen_profile?: any;
+  lawyer_profile?: any;
+}
+
+export interface LawyerAvailability {
+  id?: string;
+  lawyer_user_id: string;
+  available_days: number[];
+  start_time_utc: string;
+  end_time_utc: string;
+  slot_duration_minutes: number;
+  timezone: string;
+  unavailable_dates: string[];
+  is_accepting_new_clients?: boolean;
+}
+
+export const createOrGetConsultationConversation = (payload: {
+  consultation_request_id: string;
+  initial_message?: string;
+}) => api.post('/api/conversations/consultation', payload).then(r => r.data);
+
+export const createOrGetCaseConversation = (payload: {
+  case_id: string;
+  conversation_type?: string;
+  initial_message?: string;
+}) => api.post('/api/conversations/case', payload).then(r => r.data);
+
+export const getConversations = () =>
+  api.get('/api/conversations').then(r => r.data);
+
+export const getConversation = (conversationId: string) =>
+  api.get(`/api/conversations/${encodeURIComponent(conversationId)}`).then(r => r.data);
+
+export const sendConversationMessage = (
+  conversationId: string,
+  payload: {
+    message_body: string;
+    message_type?: string;
+    client_message_id?: string;
+  }
+) => api.post(`/api/conversations/${encodeURIComponent(conversationId)}/messages`, payload).then(r => r.data);
+
+export const getConversationMessages = (
+  conversationId: string,
+  params?: { limit?: number; before?: string }
+) => {
+  const q = new URLSearchParams();
+  if (params?.limit) q.set('limit', String(params.limit));
+  if (params?.before) q.set('before', params.before);
+  const qs = q.toString() ? `?${q.toString()}` : '';
+  return api.get(`/api/conversations/${encodeURIComponent(conversationId)}/messages${qs}`).then(r => r.data);
+};
+
+export const markConversationRead = (conversationId: string) =>
+  api.post(`/api/conversations/${encodeURIComponent(conversationId)}/read`).then(r => r.data);
+
+export const uploadConversationAttachment = (conversationId: string, file: File) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  return api.post(`/api/conversations/${encodeURIComponent(conversationId)}/attachments`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }).then(r => r.data);
+};
+
+export const getAttachmentSignedUrl = (attachmentId: string) =>
+  api.get(`/api/conversations/attachments/${encodeURIComponent(attachmentId)}/url`).then(r => r.data);
+
+export const scheduleMeeting = (payload: {
+  consultation_request_id?: string;
+  case_id?: string;
+  lawyer_user_id: string;
+  scheduled_start: string;
+  scheduled_end: string;
+  meeting_mode?: string;
+  agenda?: string;
+  phone_contact?: string;
+}) => api.post('/api/meetings/schedule', payload).then(r => r.data);
+
+export const getUserMeetings = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+  return api.get(`/api/meetings${qs}`).then(r => r.data);
+};
+
+export const getMeetingDetails = (meetingId: string) =>
+  api.get(`/api/meetings/${encodeURIComponent(meetingId)}`).then(r => r.data);
+
+export const updateMeetingStatus = (
+  meetingId: string,
+  payload: {
+    status: string;
+    notes?: string;
+    online_meeting_url?: string;
+    location_details?: string;
+    phone_contact?: string;
+    reschedule_start?: string;
+    reschedule_end?: string;
+  }
+) => api.patch(`/api/meetings/${encodeURIComponent(meetingId)}/status`, payload).then(r => r.data);
+
+export const getLawyerAvailability = (lawyerId: string) =>
+  api.get(`/api/lawyers/${encodeURIComponent(lawyerId)}/availability`).then(r => r.data);
+
+export const updateLawyerAvailability = (payload: LawyerAvailability) =>
+  api.put('/api/lawyer/availability', payload).then(r => r.data);
+
+
 

@@ -19,13 +19,15 @@ import {
   ArrowRight,
   ExternalLink,
   ChevronRight,
-  UserCheck
+  UserCheck,
+  Calendar
 } from 'lucide-react';
 import {
   getCitizenConsultations,
   updateConsultationStatus,
   shareCaseWithLawyer,
   revokeLawyerCaseAccess,
+  createOrGetConsultationConversation,
   ConsultationRequest
 } from '@/lib/api';
 
@@ -108,6 +110,21 @@ export default function CitizenConsultationsPage() {
       setTimeout(() => setActionSuccess(null), 3500);
     } catch (err: any) {
       alert(err?.response?.data?.detail || 'Failed to revoke case access.');
+    } finally {
+      setActionInProgress(null);
+    }
+  };
+
+  const handleStartMessaging = async (consultationId: string) => {
+    const key = `msg_${consultationId}`;
+    setActionInProgress(key);
+    try {
+      const conv = await createOrGetConsultationConversation({
+        consultation_request_id: consultationId
+      });
+      router.push(`/messages?id=${encodeURIComponent(conv.id)}`);
+    } catch (err: any) {
+      alert(err?.response?.data?.detail || 'Failed to initialize conversation with counsel.');
     } finally {
       setActionInProgress(null);
     }
@@ -362,6 +379,26 @@ export default function CitizenConsultationsPage() {
 
                   {/* Right Column: Citizen Actions */}
                   <div className="flex sm:flex-col gap-2 shrink-0 pt-2 lg:pt-0">
+                    {req.status === 'ACCEPTED' && (
+                      <>
+                        <button
+                          onClick={() => handleStartMessaging(req.id)}
+                          disabled={actionInProgress === `msg_${req.id}`}
+                          className="px-4 py-2 bg-court-maroon hover:bg-rose-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer"
+                        >
+                          <MessageSquare size={13} />
+                          <span>Message Counsel</span>
+                        </button>
+                        <Link
+                          href={`/messages`}
+                          className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-amber-300 rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-1.5 shadow-xs text-center"
+                        >
+                          <Calendar size={13} className="text-amber-300" />
+                          <span>Schedule Session</span>
+                        </Link>
+                      </>
+                    )}
+
                     {req.status === 'PENDING' && (
                       <button
                         onClick={() => handleWithdraw(req.id)}
@@ -389,3 +426,4 @@ export default function CitizenConsultationsPage() {
     </div>
   );
 }
+

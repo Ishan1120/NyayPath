@@ -65,6 +65,16 @@ try:
         CaseAccessGrantRequest,
         CaseAccessRevokeRequest
     )
+    from .messaging import (
+        communication_manager,
+        ConversationCreateRequest,
+        ConsultationConversationRequest,
+        CaseConversationRequest,
+        MessageSendRequest,
+        MeetingScheduleRequest,
+        MeetingStatusUpdateRequest,
+        LawyerAvailabilityPayload,
+    )
     from .document_access import DocumentAccessManager
     from .citizen_workspace import (
         citizen_workspace_manager,
@@ -127,6 +137,16 @@ except ImportError:
         ConsultationStatusUpdateRequest,
         CaseAccessGrantRequest,
         CaseAccessRevokeRequest
+    )
+    from messaging import (
+        communication_manager,
+        ConversationCreateRequest,
+        ConsultationConversationRequest,
+        CaseConversationRequest,
+        MessageSendRequest,
+        MeetingScheduleRequest,
+        MeetingStatusUpdateRequest,
+        LawyerAvailabilityPayload,
     )
     from document_access import DocumentAccessManager
     from citizen_workspace import (
@@ -1838,6 +1858,200 @@ def resolve_legal_citations(payload: CitationResolveRequest, request: Request):
         query=payload.query.strip(),
         max_results=payload.max_results or 3
     )
+
+
+# =====================================================================
+# Phase 6: Secure Messaging, Client Communication & Meeting Scheduling
+# =====================================================================
+
+@app.post("/api/conversations/consultation")
+def create_or_get_consultation_conversation_endpoint(payload: ConsultationConversationRequest, request: Request):
+    """
+    Creates or returns an active conversation for an ACCEPTED consultation request.
+    Caller must be either the citizen requester or the assigned lawyer.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.create_or_get_consultation_conversation(
+        user=user,
+        consultation_request_id=payload.consultation_request_id,
+        initial_message=payload.initial_message
+    )
+
+
+@app.post("/api/conversations/case")
+def create_or_get_case_conversation_endpoint(payload: CaseConversationRequest, request: Request):
+    """
+    Creates or returns a conversation for a case.
+    Authorized for case owner, lawyer with ACTIVE case share, or assigned institution proctors.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.create_or_get_case_conversation(
+        user=user,
+        case_id=payload.case_id,
+        conversation_type=payload.conversation_type or "GENERAL_CASE",
+        initial_message=payload.initial_message
+    )
+
+
+@app.get("/api/conversations")
+def list_user_conversations_endpoint(request: Request):
+    """
+    Lists all active conversations where the authenticated user is a participant.
+    Includes unread counts, last message snippet, and participant profiles.
+    Dynamically filters out conversations for cases whose access has been revoked.
+    """
+    user = get_current_authenticated_user(request)
+    conversations = communication_manager.list_user_conversations(user)
+    return {"conversations": conversations}
+
+
+@app.get("/api/conversations/{conversation_id}")
+def get_conversation_endpoint(conversation_id: str, request: Request):
+    """
+    Returns metadata and participant list for a specific conversation.
+    Caller must be an active participant. Re-validates active case share if case-linked.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.get_conversation(user, conversation_id)
+
+
+@app.post("/api/conversations/{conversation_id}/messages")
+def send_conversation_message_endpoint(conversation_id: str, payload: MessageSendRequest, request: Request):
+    """
+    Sends a message within a conversation.
+    Authoritative sender identity derived from verified JWT.
+    Enforces deduplication via client_message_id, 4,000 char limit, and triggers in-app notification.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.send_message(user, conversation_id, payload)
+
+
+@app.get("/api/conversations/{conversation_id}/messages")
+def list_conversation_messages_endpoint(
+    conversation_id: str,
+    request: Request,
+    limit: Optional[int] = 50,
+    before: Optional[str] = None
+):
+    """
+    Lists paginated message history for a conversation.
+    Chronologically ordered, includes attachment metadata and sender profile details.
+    """
+    user = get_current_authenticated_user(request)
+    messages = communication_manager.list_conversation_messages(
+        user=user,
+        conversation_id=conversation_id,
+        limit=limit or 50,
+        before=before
+    )
+    return {"messages": messages}
+
+
+@app.post("/api/conversations/{conversation_id}/read")
+def mark_conversation_read_endpoint(conversation_id: str, request: Request):
+    """
+    Updates the calling participant's last_read_at timestamp to reset unread counters.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.mark_conversation_read(user, conversation_id)
+
+
+@app.post("/api/conversations/{conversation_id}/attachments")
+async def upload_conversation_attachment_endpoint(
+    conversation_id: str,
+    request: Request,
+    file: UploadFile = File(...)
+):
+    """
+    Uploads an attachment (PDF, JPEG, PNG, WebP; max 10MB) to the private message-attachments bucket.
+    Caller must be an active participant in the conversation.
+    Returns attachment metadata with a signed download URL (capped <= 300s TTL).
+    """
+    user = get_current_authenticated_user(request)
+    file_bytes = await file.read()
+    filename = file.filename or "attachment"
+    mime_type = file.content_type or "application/octet-stream"
+
+    return communication_manager.upload_attachment(
+        user=user,
+        conversation_id=conversation_id,
+        file_bytes=file_bytes,
+        filename=filename,
+        mime_type=mime_type
+    )
+
+
+@app.get("/api/conversations/attachments/{attachment_id}/url")
+def get_attachment_signed_url_endpoint(attachment_id: str, request: Request):
+    """
+    Generates a fresh signed URL (TTL <= 300s) for a conversation attachment.
+    Caller must be an active participant in the associated conversation.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.get_attachment_signed_url(user, attachment_id)
+
+
+@app.post("/api/meetings/schedule")
+def schedule_meeting_endpoint(payload: MeetingScheduleRequest, request: Request):
+    """
+    Schedules a consultation or case meeting.
+    Enforces transactional double-booking prevention and respects lawyer availability schedule.
+    Meeting credentials/links remain hidden until status is CONFIRMED.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.schedule_meeting(user, payload)
+
+
+@app.get("/api/meetings")
+def list_user_meetings_endpoint(request: Request, status: Optional[str] = None):
+    """
+    Lists meetings for the authenticated user (as citizen requester or lawyer counsel).
+    Sensitive meeting credentials (URLs, chamber addresses) are masked unless status is CONFIRMED.
+    """
+    user = get_current_authenticated_user(request)
+    meetings = communication_manager.list_user_meetings(user, status_filter=status)
+    return {"meetings": meetings}
+
+
+@app.get("/api/meetings/{meeting_id}")
+def get_meeting_details_endpoint(meeting_id: str, request: Request):
+    """
+    Retrieves meeting details.
+    Restricted to meeting participants or platform admin. Masks credentials if not CONFIRMED.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.get_meeting_details(user, meeting_id)
+
+
+@app.patch("/api/meetings/{meeting_id}/status")
+def update_meeting_status_endpoint(meeting_id: str, payload: MeetingStatusUpdateRequest, request: Request):
+    """
+    Updates meeting lifecycle status:
+    - Lawyer can confirm, decline, or mark completed.
+    - Citizen or Lawyer can cancel or request reschedule.
+    - Double-booking check enforced on confirmation or reschedule.
+    - Dispatches deterministic notification to counterparty.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.update_meeting_status(user, meeting_id, payload)
+
+
+@app.get("/api/lawyers/{lawyer_id}/availability")
+def get_lawyer_availability_endpoint(lawyer_id: str):
+    """
+    Public/Authenticated: returns practice availability schedule and blackout dates for a lawyer.
+    """
+    return communication_manager.get_lawyer_availability(lawyer_id)
+
+
+@app.put("/api/lawyer/availability")
+def update_lawyer_availability_endpoint(payload: LawyerAvailabilityPayload, request: Request):
+    """
+    Updates the authenticated lawyer's availability schedule and blackout dates.
+    """
+    user = get_current_authenticated_user(request)
+    return communication_manager.update_lawyer_availability(user, payload)
+
 
 
 
