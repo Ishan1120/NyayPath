@@ -221,3 +221,4 @@ To guarantee platform integrity, the entire NyayPath regression suite was execut
 - **Local Supabase Exclusivity:** All migrations, tables, triggers, policies, and test data were created strictly in local Supabase (`http://127.0.0.1:54321`, PostgreSQL 17.11 @ port 54322).
 - **Remote Guardrails:** Remote Supabase project `dbwojjxfhnmmwrnqxyqj` and Vercel hosting were not modified, connected to, or pushed.
 - **Production Safety:** All database queries utilize persistent tables with fail-closed exception handlers; zero reliance on local mock fallback data in production code paths.
+

@@ -311,10 +311,10 @@ class TestPhase6Messaging(unittest.TestCase):
         # Verify notification dispatched to Alice
         notifs = supabase_admin.table("notifications").select("*").eq(
             "recipient_user_id", CITIZEN_A_UUID
-        ).eq("event_type", "NEW_MESSAGE").execute()
+        ).eq("event_type", "NEW_MESSAGE").order("created_at", desc=True).limit(5).execute()
 
         self.assertTrue(len(notifs.data) > 0)
-        latest_notif = notifs.data[-1]
+        latest_notif = notifs.data[0]
         self.assertIn("Adv. Rajesh Kumar", latest_notif["title"])
         self.assertIn("Section 439", latest_notif["message"])
 

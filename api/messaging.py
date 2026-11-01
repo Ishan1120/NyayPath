@@ -151,6 +151,64 @@ class CommunicationManager:
                 except Exception as e:
                     logger.warning(f"CommunicationManager reconnect failed: {e}")
 
+    def _verify_lawyer_case_access(
+        self,
+        lawyer_uid: str,
+        case_uuid: str,
+        required_scope: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Phase 6.1: Strictly verifies that a lawyer has an ACTIVE lawyer_case_access record
+        for the given case UUID. Fails closed with HTTP 403 on missing, inactive,
+        revoked, scope-insufficient, or failed database checks.
+        """
+        self._ensure_connected()
+        if not self.supabase:
+            raise HTTPException(status_code=500, detail="Database connection unavailable.")
+
+        try:
+            res = self.supabase.table("lawyer_case_access").select(
+                "id, case_uuid, lawyer_user_id, access_status, shared_scope"
+            ).eq("case_uuid", str(case_uuid)).eq("lawyer_user_id", str(lawyer_uid)).execute()
+        except Exception as e:
+            logger.error(f"Database error verifying lawyer case access for {lawyer_uid} on {case_uuid}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Unable to verify case sharing authorization."
+            )
+
+        if not res or not res.data or len(res.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: No active case sharing authorization found for this case."
+            )
+
+        access_row = res.data[0]
+        # Match check
+        if str(access_row.get("lawyer_user_id")) != str(lawyer_uid) or str(access_row.get("case_uuid")) != str(case_uuid):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Authorization record identity mismatch."
+            )
+
+        # Status check: must be strictly ACTIVE
+        current_status = (access_row.get("access_status") or "").strip().upper()
+        if current_status != "ACTIVE":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: Case sharing permission is {current_status.lower() or 'inactive'}."
+            )
+
+        # Scope check if required_scope specified
+        scope = (access_row.get("shared_scope") or "").strip().upper()
+        if required_scope == "CASE_AND_DOCS" and scope != "CASE_AND_DOCS":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Case sharing scope does not permit document attachment access."
+            )
+
+        return access_row
+
     # =========================================================================
     # Conversation Creation & Authorization
     # =========================================================================
@@ -314,19 +372,7 @@ class CommunicationManager:
 
         # 2. Check Lawyer Case Access Pathway
         if user.role == UserRole.LAWYER:
-            acc_res = self.supabase.table("lawyer_case_access").select("*").eq(
-                "case_uuid", case_uuid
-            ).eq(
-                "lawyer_user_id", caller_uid
-            ).eq(
-                "access_status", "ACTIVE"
-            ).execute()
-
-            if not acc_res.data or len(acc_res.data) == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied: You do not have active authorized case sharing permission for this case."
-                )
+            self._verify_lawyer_case_access(caller_uid, case_uuid)
             other_party_uid = owner_id
             conv_type = "LAWYER_CITIZEN"
             participant_role = "lawyer"
@@ -466,19 +512,26 @@ class CommunicationManager:
         conversations = conv_res.data or []
         valid_conversations = []
 
-        # 3. Dynamic Revocation Filter:
-        # If caller is a lawyer and conversation is tied to a case, verify access is still ACTIVE
-        revoked_case_uuids = set()
+        # 3. Dynamic Case Access Filter:
+        # If caller is a lawyer and conversation is tied to a case, verify access is actively ACTIVE
+        active_case_uuids = set()
         if user.role == UserRole.LAWYER:
-            rev_res = self.supabase.table("lawyer_case_access").select("case_uuid").eq(
-                "lawyer_user_id", caller_uid
-            ).eq("access_status", "REVOKED").execute()
-            revoked_case_uuids = {str(r["case_uuid"]) for r in rev_res.data or []}
+            try:
+                active_res = self.supabase.table("lawyer_case_access").select("case_uuid").eq(
+                    "lawyer_user_id", caller_uid
+                ).eq("access_status", "ACTIVE").execute()
+                active_case_uuids = {str(r["case_uuid"]) for r in active_res.data or []}
+            except Exception as e:
+                logger.error(f"Failed to query active lawyer case access for {caller_uid}: {e}")
+                # Fail closed: treat as having no active case access
+                active_case_uuids = set()
 
         for conv in conversations:
-            if conv.get("related_case_uuid") and str(conv.get("related_case_uuid")) in revoked_case_uuids:
-                # Lawyer access was explicitly revoked; hide case-specific conversation
-                continue
+            if user.role == UserRole.LAWYER and conv.get("related_case_uuid"):
+                case_uuid_str = str(conv.get("related_case_uuid"))
+                if case_uuid_str not in active_case_uuids:
+                    # Missing, revoked, or inactive case share record: hide from lawyer conversation list
+                    continue
             valid_conversations.append(conv)
 
         # 4. Enrich with participant profiles & unread counts
@@ -548,16 +601,9 @@ class CommunicationManager:
                 detail="Access denied: You are not an active participant in this conversation."
             )
 
-        # Dynamic Revocation Check for Lawyer
+        # Dynamic Authorization Check for Lawyer on Case-Linked Conversations
         if user.role == UserRole.LAWYER and conv.get("related_case_uuid"):
-            acc_res = self.supabase.table("lawyer_case_access").select("access_status").eq(
-                "case_uuid", conv["related_case_uuid"]
-            ).eq("lawyer_user_id", caller_uid).execute()
-            if acc_res.data and acc_res.data[0].get("access_status") == "REVOKED":
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied: Case sharing permission for this matter has been revoked."
-                )
+            self._verify_lawyer_case_access(caller_uid, conv["related_case_uuid"])
 
         # Load participants roster
         all_parts = self.supabase.table("conversation_participants").select(
@@ -602,6 +648,9 @@ class CommunicationManager:
 
         # 1. Authorize sender in conversation
         conv = self.get_conversation(user, clean_id)
+        if user.role == UserRole.LAWYER and conv.get("related_case_uuid"):
+            req_scope = "CASE_AND_DOCS" if payload.message_type == "ATTACHMENT" else None
+            self._verify_lawyer_case_access(caller_uid, conv["related_case_uuid"], required_scope=req_scope)
 
         # 2. Check client_message_id idempotency
         client_msg_id = payload.client_message_id.strip() if payload.client_message_id else None
@@ -689,7 +738,12 @@ class CommunicationManager:
 
         clean_id = conversation_id.strip()
         # Verify caller has active access
-        self.get_conversation(user, clean_id)
+        conv = self.get_conversation(user, clean_id)
+        is_metadata_only = False
+        if user.role == UserRole.LAWYER and conv.get("related_case_uuid"):
+            acc = self._verify_lawyer_case_access(str(user.user_id), conv["related_case_uuid"])
+            if (acc.get("shared_scope") or "").strip().upper() == "METADATA_ONLY":
+                is_metadata_only = True
 
         # Query messages with attachments
         clamped_limit = min(max(1, limit), 100)
@@ -716,7 +770,7 @@ class CommunicationManager:
             sender_map = {p["id"]: p for p in p_res.data or []}
 
         for m in messages:
-            m["attachments"] = att_map.get(m["id"], [])
+            m["attachments"] = [] if is_metadata_only else att_map.get(m["id"], [])
             m["sender"] = sender_map.get(m["sender_user_id"], {"full_name": "User"})
 
         return messages
@@ -731,6 +785,9 @@ class CommunicationManager:
             raise HTTPException(status_code=500, detail="Database connection unavailable.")
 
         clean_id = conversation_id.strip()
+        # Verify active membership and dynamic permissions
+        self.get_conversation(user, clean_id)
+
         caller_uid = str(user.user_id)
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -768,6 +825,12 @@ class CommunicationManager:
         clean_id = conversation_id.strip()
         # Verify authorization
         conv = self.get_conversation(user, clean_id)
+        if user.role == UserRole.LAWYER and conv.get("related_case_uuid"):
+            self._verify_lawyer_case_access(
+                lawyer_uid=str(user.user_id),
+                case_uuid=conv["related_case_uuid"],
+                required_scope="CASE_AND_DOCS"
+            )
 
         # 1. Size check: 10MB maximum
         if len(file_bytes) > 10 * 1024 * 1024:
@@ -851,8 +914,14 @@ class CommunicationManager:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attachment not found.")
 
         att = att_res.data[0]
-        # Revalidate caller's access to the conversation
-        self.get_conversation(user, att["conversation_id"])
+        # Revalidate caller's access to the conversation and document scope
+        conv = self.get_conversation(user, att["conversation_id"])
+        if user.role == UserRole.LAWYER and conv.get("related_case_uuid"):
+            self._verify_lawyer_case_access(
+                lawyer_uid=str(user.user_id),
+                case_uuid=conv["related_case_uuid"],
+                required_scope="CASE_AND_DOCS"
+            )
 
         signed_url_res = self.supabase.storage.from_("message-attachments").create_signed_url(att["storage_path"], 300)
         signed_url = signed_url_res.get("signedURL") or signed_url_res.get("signedUrl") if isinstance(signed_url_res, dict) else str(signed_url_res)
@@ -993,7 +1062,17 @@ class CommunicationManager:
             "updated_at": now_iso
         }
 
-        self.supabase.table("consultation_meetings").insert(meeting_record).execute()
+        try:
+            self.supabase.table("consultation_meetings").insert(meeting_record).execute()
+        except Exception as e:
+            err_str = str(e).lower()
+            if "exclude" in err_str or "23p01" in err_str or "conflict" in err_str:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Time slot conflict: Advocate already has a confirmed meeting scheduled during this window."
+                )
+            logger.error(f"Error scheduling meeting: {e}")
+            raise HTTPException(status_code=500, detail="Failed to schedule meeting.")
 
         # 7. Notify Recipient
         recipient_uid = lawyer_uid if not is_lawyer else citizen_uid
@@ -1074,7 +1153,17 @@ class CommunicationManager:
                 update_dict["scheduled_start"] = payload.reschedule_start
                 update_dict["scheduled_end"] = payload.reschedule_end
 
-        res = self.supabase.table("consultation_meetings").update(update_dict).eq("id", clean_id).execute()
+        try:
+            res = self.supabase.table("consultation_meetings").update(update_dict).eq("id", clean_id).execute()
+        except Exception as e:
+            err_str = str(e).lower()
+            if "exclude" in err_str or "23p01" in err_str or "conflict" in err_str:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot confirm: You have an overlapping confirmed meeting."
+                )
+            logger.error(f"Error updating meeting status: {e}")
+            raise HTTPException(status_code=500, detail="Failed to update meeting status.")
         updated_meeting = res.data[0] if res.data else {**meeting, **update_dict}
 
         # Notify the other party

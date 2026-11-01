@@ -342,3 +342,4 @@ ON public.lawyer_availability FOR ALL
 TO authenticated
 USING (lawyer_user_id = auth.uid())
 WITH CHECK (lawyer_user_id = auth.uid());
+
