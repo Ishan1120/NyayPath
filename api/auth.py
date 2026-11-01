@@ -233,6 +233,7 @@ class UserRole(str, Enum):
     COMMITTEE_MEMBER = "committee_member"
     INSTITUTION_ADMIN = "institution_admin"
     PLATFORM_ADMIN = "platform_admin"
+    LAWYER = "lawyer"
 
 class AccountStatus(str, Enum):
     ACTIVE = "active"

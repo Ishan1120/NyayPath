@@ -717,7 +717,7 @@ class CampusProctorManager:
             actor_type="USER",
             supabase_client=self.supabase
         )
-        activity_id = (act_rec.get("id") if isinstance(act_rec, dict) else None) or str(uuid.uuid4())
+        activity_id = act_rec.get("id") if isinstance(act_rec, dict) else None
 
         # Dispatch In-App Notifications (Phase 2.3 & 4: Immutable activity_id idempotency)
         try:
@@ -728,7 +728,7 @@ class CampusProctorManager:
             except ImportError:
                 notification_manager = None
 
-        if notification_manager:
+        if notification_manager and activity_id:
             try:
                 student_uid = case.get("student_user_id")
                 if student_uid:
@@ -833,21 +833,21 @@ Statutory Mandate: UGC (Grievance Redressal of Students) Regulations, 2023
 3. SUMMARY OF INQUIRY PROCEEDINGS & FINDINGS:
    {case['description']}
 
-4. PROCTORIAL DIRECTIVE & ACTION TAKEN:
-   - Notes by Chief Proctor : {case.get('proctor_notes', 'Under investigation.')}
-   - Hearing / Meeting Date : {case.get('hearing_date', 'To be scheduled.')}
-   - Institutional Action   : {case.get('action_taken', 'Pending departmental review.')}
-   - Statutory UGC Deadline : {case.get('resolution_deadline', '15 Days')} (UGC SLA)
+4. STATUTORY TIMELINE UNDER UGC REGULATIONS, 2023:
+   - Institutional Referral : Grievance referral to SGRC within 15 days of filing.
+   - SGRC Determination     : Committee inquiry report preferably within 15 working days.
+   - Student Appeal Window  : Aggrieved complainant may appeal to University Ombudsperson within 15 days of SGRC decision.
+   - Ombudsperson Window    : University Ombudsperson resolution mandate within 30 days.
 
-5. ESCALATION PRIVILEGE:
-   If this matter remains unredressed beyond the 15-day statutory window, the student
-   retains the non-derogable right under Section 6(1) of the RTI Act, 2005 read with
-   CBSE v. Aditya Bandopadhyay [(2011) 8 SCC 497] to escalate this matter to the
-   State University / Chancellor's Secretariat.
+5. ESCALATION & APPELLATE PRIVILEGE:
+   If this matter remains unredressed or the complainant is aggrieved by the SGRC determination,
+   the student retains the statutory right under Regulation 6 of the UGC (Grievance Redressal of Students)
+   Regulations, 2023 to file an appeal before the University Ombudsperson, without prejudice to
+   statutory transparency remedies under Section 6(1) of the RTI Act, 2005.
 
 By Order of,
-The Chief Proctor & Student Ombudsperson,
-Campus Grievance Redressal Committee (SGRC)
+The Chief Proctor & Campus Grievance Redressal Cell,
+Student Grievance Redressal Committee (SGRC)
 ================================================================================
 """
         return notice
@@ -1020,26 +1020,27 @@ Campus Grievance Redressal Committee (SGRC)
             actor_type="USER",
             supabase_client=self.supabase
         )
-        activity_id = (act_rec.get("id") if isinstance(act_rec, dict) else None) or str(uuid.uuid4())
+        activity_id = act_rec.get("id") if isinstance(act_rec, dict) else None
 
         # Dispatch In-App Notification (Phase 2.3 & 4)
-        try:
-            from .notifications import notification_manager
-        except ImportError:
-            from notifications import notification_manager
-        try:
-            notification_manager.create_notification(
-                recipient_user_id=target_user_id,
-                event_type="COMMITTEE_ASSIGNED",
-                title="Appointed to Inquiry Committee",
-                message=f"You have been appointed to the inquiry committee for case {clean_id}.",
-                related_case_id=clean_id,
-                case_uuid=case.get("id"),
-                action_url=f"/campus-proctor/committee?case_id={clean_id}",
-                idempotency_key=f"notif_act_{activity_id}_comm_{target_user_id}"
-            )
-        except Exception as e_notif:
-            logger.warning(f"Error dispatching committee assignment notification: {e_notif}")
+        if activity_id:
+            try:
+                from .notifications import notification_manager
+            except ImportError:
+                from notifications import notification_manager
+            try:
+                notification_manager.create_notification(
+                    recipient_user_id=target_user_id,
+                    event_type="COMMITTEE_ASSIGNED",
+                    title="Appointed to Inquiry Committee",
+                    message=f"You have been appointed to the inquiry committee for case {clean_id}.",
+                    related_case_id=clean_id,
+                    case_uuid=case.get("id"),
+                    action_url=f"/campus-proctor/committee?case_id={clean_id}",
+                    idempotency_key=f"notif_act_{activity_id}_comm_{target_user_id}"
+                )
+            except Exception as e_notif:
+                logger.warning(f"Error dispatching committee assignment notification: {e_notif}")
 
         return assignment_record
 
@@ -1112,26 +1113,27 @@ Campus Grievance Redressal Committee (SGRC)
             actor_type="USER",
             supabase_client=self.supabase
         )
-        activity_id = (act_rec.get("id") if isinstance(act_rec, dict) else None) or str(uuid.uuid4())
+        activity_id = act_rec.get("id") if isinstance(act_rec, dict) else None
 
         # Dispatch In-App Notification (Phase 2.3 & 4)
-        try:
-            from .notifications import notification_manager
-        except ImportError:
-            from notifications import notification_manager
-        try:
-            notification_manager.create_notification(
-                recipient_user_id=target_user_id,
-                event_type="COMMITTEE_REVOKED",
-                title="Committee Assignment Revoked",
-                message=f"Your appointment to the inquiry committee for case {clean_id} has been revoked.",
-                related_case_id=clean_id,
-                case_uuid=case.get("id"),
-                action_url="/campus-proctor/committee",
-                idempotency_key=f"notif_act_{activity_id}_comm_rev_{target_user_id}"
-            )
-        except Exception as e_notif:
-            logger.warning(f"Error dispatching committee revocation notification: {e_notif}")
+        if activity_id:
+            try:
+                from .notifications import notification_manager
+            except ImportError:
+                from notifications import notification_manager
+            try:
+                notification_manager.create_notification(
+                    recipient_user_id=target_user_id,
+                    event_type="COMMITTEE_REVOKED",
+                    title="Committee Assignment Revoked",
+                    message=f"Your appointment to the inquiry committee for case {clean_id} has been revoked.",
+                    related_case_id=clean_id,
+                    case_uuid=case.get("id"),
+                    action_url="/campus-proctor/committee",
+                    idempotency_key=f"notif_act_{activity_id}_comm_rev_{target_user_id}"
+                )
+            except Exception as e_notif:
+                logger.warning(f"Error dispatching committee revocation notification: {e_notif}")
 
         return revoked_record
 
@@ -1754,29 +1756,30 @@ Campus Grievance Redressal Committee (SGRC)
             actor_type="USER",
             supabase_client=self.supabase
         )
-        activity_id = (act_rec.get("id") if isinstance(act_rec, dict) else None) or str(uuid.uuid4())
+        activity_id = act_rec.get("id") if isinstance(act_rec, dict) else None
 
         # Notify assigned proctor if assigned
-        try:
-            from .notifications import notification_manager
-        except ImportError:
-            from notifications import notification_manager
-
-        assigned_proctor_uid = case.get("assigned_proctor_user_id")
-        if assigned_proctor_uid and str(assigned_proctor_uid).lower() != str(member_user.user_id).lower():
+        if activity_id:
             try:
-                notification_manager.create_notification(
-                    recipient_user_id=str(assigned_proctor_uid),
-                    event_type="COMMITTEE_OBSERVATIONS",
-                    title="Committee Findings Submitted",
-                    message=f"New committee observations and findings have been recorded for case {clean_id}.",
-                    related_case_id=clean_id,
-                    case_uuid=case.get("id"),
-                    action_url=f"/campus-proctor/dashboard?case_id={clean_id}",
-                    idempotency_key=f"notif_act_{activity_id}_obs_{assigned_proctor_uid}"
-                )
-            except Exception as e_notif:
-                logger.warning(f"Error dispatching committee observation notification: {e_notif}")
+                from .notifications import notification_manager
+            except ImportError:
+                from notifications import notification_manager
+
+            assigned_proctor_uid = case.get("assigned_proctor_user_id")
+            if assigned_proctor_uid and str(assigned_proctor_uid).lower() != str(member_user.user_id).lower():
+                try:
+                    notification_manager.create_notification(
+                        recipient_user_id=str(assigned_proctor_uid),
+                        event_type="COMMITTEE_OBSERVATIONS",
+                        title="Committee Findings Submitted",
+                        message=f"New committee observations and findings have been recorded for case {clean_id}.",
+                        related_case_id=clean_id,
+                        case_uuid=case.get("id"),
+                        action_url=f"/campus-proctor/dashboard?case_id={clean_id}",
+                        idempotency_key=f"notif_act_{activity_id}_obs_{assigned_proctor_uid}"
+                    )
+                except Exception as e_notif:
+                    logger.warning(f"Error dispatching committee observation notification: {e_notif}")
 
         return {
             "status": "success",

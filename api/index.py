@@ -55,6 +55,16 @@ try:
         InstitutionMemberStatusUpdate,
         CommitteeObservationRequest
     )
+    from .lawyer_connect import (
+        lawyer_connect_manager,
+        LawyerRegisterRequest,
+        LawyerProfileUpdateRequest,
+        LawyerVerifyRequest,
+        ConsultationCreateRequest,
+        ConsultationStatusUpdateRequest,
+        CaseAccessGrantRequest,
+        CaseAccessRevokeRequest
+    )
     from .document_access import DocumentAccessManager
     from .citizen_workspace import (
         citizen_workspace_manager,
@@ -107,6 +117,16 @@ except ImportError:
         CaseCommitteeRevokeRequest,
         InstitutionMemberStatusUpdate,
         CommitteeObservationRequest
+    )
+    from lawyer_connect import (
+        lawyer_connect_manager,
+        LawyerRegisterRequest,
+        LawyerProfileUpdateRequest,
+        LawyerVerifyRequest,
+        ConsultationCreateRequest,
+        ConsultationStatusUpdateRequest,
+        CaseAccessGrantRequest,
+        CaseAccessRevokeRequest
     )
     from document_access import DocumentAccessManager
     from citizen_workspace import (
@@ -1330,6 +1350,162 @@ def add_committee_observations_endpoint(payload: CommitteeObservationRequest, re
         member_user=user
     )
     return result
+
+
+# =====================================================================
+# Phase 5: Lawyer Workspace, Directory & Client Connect Endpoints
+# =====================================================================
+
+@app.post("/api/lawyer/register")
+def register_lawyer_endpoint(payload: LawyerRegisterRequest, request: Request):
+    """
+    Onboards a lawyer into the professional directory.
+    Registration defaults to PENDING verification.
+    """
+    user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.register_lawyer(user, payload)
+
+
+@app.get("/api/lawyers")
+def list_verified_lawyers_endpoint(
+    request: Request,
+    specialization: Optional[str] = None,
+    state: Optional[str] = None,
+    court: Optional[str] = None,
+    language: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 20,
+    offset: int = 0
+):
+    """
+    Public directory of VERIFIED lawyers with search and filters.
+    Sensitive enrollment credentials are strictly stripped.
+    """
+    return lawyer_connect_manager.list_verified_lawyers(
+        specialization=specialization,
+        state=state,
+        court=court,
+        language=language,
+        search=search,
+        limit=limit,
+        offset=offset
+    )
+
+
+@app.get("/api/lawyers/{lawyer_id}")
+def get_lawyer_profile_endpoint(lawyer_id: str, request: Request):
+    """
+    Retrieves a lawyer profile.
+    Unverified lawyers return 404 to public viewers.
+    """
+    viewer = get_current_user_optional(request)
+    return lawyer_connect_manager.get_lawyer_profile(lawyer_id, viewer)
+
+
+@app.patch("/api/lawyer/profile")
+def update_lawyer_profile_endpoint(payload: LawyerProfileUpdateRequest, request: Request):
+    """
+    Allows a lawyer to update permitted non-sensitive profile attributes.
+    """
+    user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.update_lawyer_profile(user, payload)
+
+
+@app.post("/api/admin/lawyers/{lawyer_id}/verify")
+def verify_lawyer_endpoint(lawyer_id: str, payload: LawyerVerifyRequest, request: Request):
+    """
+    Platform administrator verification of lawyer credentials.
+    Permitted decisions: VERIFIED, REJECTED, SUSPENDED.
+    """
+    admin_user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.verify_lawyer(
+        admin_user=admin_user,
+        lawyer_id=lawyer_id,
+        decision=payload.decision,
+        notes=payload.notes
+    )
+
+
+@app.post("/api/consultations/request")
+def create_consultation_request_endpoint(payload: ConsultationCreateRequest, request: Request):
+    """
+    Submits a consultation request from an authenticated citizen to a verified lawyer.
+    """
+    user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.create_consultation_request(user, payload)
+
+
+@app.get("/api/citizen/consultations")
+def list_citizen_consultations_endpoint(request: Request):
+    """
+    Lists consultation requests created by the authenticated citizen.
+    """
+    user = get_current_authenticated_user(request)
+    consultations = lawyer_connect_manager.list_citizen_consultations(user)
+    return {"consultations": consultations}
+
+
+@app.get("/api/lawyer/consultations")
+def list_lawyer_consultations_endpoint(request: Request, status: Optional[str] = None):
+    """
+    Lists consultation requests addressed to the authenticated lawyer.
+    """
+    user = get_current_authenticated_user(request)
+    consultations = lawyer_connect_manager.list_lawyer_consultations(user, status_filter=status)
+    return {"consultations": consultations}
+
+
+@app.patch("/api/consultations/{request_id}/status")
+def update_consultation_status_endpoint(
+    request_id: str,
+    payload: ConsultationStatusUpdateRequest,
+    request: Request
+):
+    """
+    Updates consultation status:
+    - Citizen can withdraw a pending request.
+    - Lawyer can accept, decline, or mark completed.
+    """
+    user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.update_consultation_status(user, request_id, payload)
+
+
+@app.post("/api/citizen/cases/share")
+def grant_case_access_endpoint(payload: CaseAccessGrantRequest, request: Request):
+    """
+    Explicitly authorizes a verified lawyer to access a specific case and documents.
+    """
+    user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.grant_case_access(user, payload)
+
+
+@app.post("/api/citizen/cases/revoke-share")
+def revoke_case_access_endpoint(payload: CaseAccessRevokeRequest, request: Request):
+    """
+    Immediately revokes lawyer access to a case.
+    """
+    user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.revoke_case_access(user, payload)
+
+
+@app.get("/api/lawyer/shared-cases")
+def list_lawyer_shared_cases_endpoint(request: Request):
+    """
+    Lists all cases actively shared with the authenticated lawyer.
+    """
+    user = get_current_authenticated_user(request)
+    cases = lawyer_connect_manager.list_lawyer_shared_cases(user)
+    return {"cases": cases}
+
+
+@app.get("/api/lawyer/dashboard-stats")
+def get_lawyer_dashboard_stats_endpoint(request: Request):
+    """
+    Returns real-time dashboard metrics derived directly from database rows.
+    """
+    user = get_current_authenticated_user(request)
+    stats = lawyer_connect_manager.get_lawyer_dashboard_stats(user)
+    return {"status": "success", "stats": stats}
 
 
 @app.post("/api/intake/clarifying-questions")

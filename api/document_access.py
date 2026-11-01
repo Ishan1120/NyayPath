@@ -253,7 +253,36 @@ class DocumentAccessManager:
                     )
                 return self._create_signed_url(case_id, document_id, access_type="UNASSIGNED_INSTITUTION_PROCTOR", ttl=ttl)
 
-        # 6. Citizen / Student Owner
+        # 6. Verified Lawyer with Explicit Case Sharing Permission (Phase 5)
+        if user.role == UserRole.LAWYER:
+            if not self.supabase or not case.get("id"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: Database verification required for lawyer case access."
+                )
+            try:
+                res_access = self.supabase.table("lawyer_case_access").select(
+                    "id, access_status, shared_scope"
+                ).eq("case_uuid", case["id"]).eq("lawyer_user_id", user.user_id).eq("access_status", "ACTIVE").execute()
+                if not res_access.data or len(res_access.data) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: You do not have active authorized case sharing permission for this case."
+                    )
+                access_record = res_access.data[0]
+                if access_record.get("shared_scope") not in ["CASE_AND_DOCS", "FULL"]:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: Case sharing authorization is limited to metadata only; document access is not permitted."
+                    )
+                return self._create_signed_url(case_id, document_id, access_type="AUTHORIZED_LAWYER", ttl=ttl)
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error checking lawyer_case_access in DocumentAccessManager: {e}")
+                raise HTTPException(status_code=500, detail="Database verification failed for lawyer case access.")
+
+        # 7. Citizen / Student Owner
         if case.get("student_user_id") != user.user_id and case.get("user_id") != user.user_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

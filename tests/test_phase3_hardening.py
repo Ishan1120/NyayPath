@@ -32,11 +32,9 @@ os.environ["SUPABASE_JWT_SECRET"] = "super-secret-jwt-token-with-at-least-32-cha
 os.environ["JWT_SECRET"] = "super-secret-jwt-token-with-at-least-32-characters-long"
 os.environ["SUPABASE_OFFLINE_TEST"] = "0"
 
-_api_dir = Path(__file__).resolve().parent.parent / "api"
 _root_dir = Path(__file__).resolve().parent.parent
-for p in [str(_api_dir), str(_root_dir)]:
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if str(_root_dir) not in sys.path:
+    sys.path.insert(0, str(_root_dir))
 
 import jwt
 from starlette.requests import Request

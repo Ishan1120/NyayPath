@@ -189,7 +189,7 @@ export default function InstitutionAdminDashboard() {
                     </span>
                   </div>
                   <p className="text-sm text-slate-500 mt-0.5">
-                    Institution Identifier: <span className="font-mono font-semibold text-slate-700">{stats?.institution_id || 'LOCAL_COLLEGE'}</span> | UGC Redressal Regulatory Compliance
+                    Institution Identifier: <span className="font-mono font-semibold text-slate-700">{stats?.institution_id || 'LOCAL_COLLEGE'}</span> | Institutional Proctorial Oversight (Formal SGRC & University Ombudsperson Appeals required under UGC 2023 Regulations)
                   </p>
                 </div>
               </div>
@@ -760,3 +760,4 @@ export default function InstitutionAdminDashboard() {
     </div>
   );
 }
+

@@ -10,6 +10,7 @@ api.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
     const token = 
       localStorage.getItem('nyaypath_citizen_token') ||
+      localStorage.getItem('nyaypath_lawyer_token') ||
       localStorage.getItem('nyaypath_token') ||
       localStorage.getItem('nyaypath_proctor_token');
     if (token && !config.headers.Authorization) {
@@ -416,4 +417,143 @@ export const getCaseCommitteeAssignments = (caseId: string) =>
 
 export const submitCommitteeObservations = (payload: CommitteeObservationPayload) =>
   api.post('/api/campus-proctor/committee/observations', payload).then(r => r.data);
+
+// =====================================================================
+// Lawyer Connect & Client Workspace API (Phase 5)
+// =====================================================================
+
+export interface LawyerProfile {
+  id: string;
+  user_id?: string;
+  lawyer_user_id?: string;
+  full_name: string;
+  email: string;
+  phone?: string;
+  bar_council: string;
+  enrollment_state: string;
+  enrollment_number?: string;
+  years_of_practice: number;
+  specializations: string[];
+  courts: string[];
+  languages: string[];
+  bio?: string;
+  consultation_preferences?: {
+    modes?: string[];
+    consultation_fee?: string;
+  };
+  photo_url?: string;
+  verification_status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'SUSPENDED';
+  created_at: string;
+}
+
+export interface ConsultationRequest {
+  id: string;
+  citizen_user_id: string;
+  lawyer_user_id: string;
+  case_id?: string;
+  case_uuid?: string;
+  legal_issue: string;
+  description: string;
+  preferred_mode: 'ONLINE' | 'IN_PERSON' | 'PHONE';
+  status: 'PENDING' | 'ACCEPTED' | 'DECLINED' | 'WITHDRAWN' | 'COMPLETED';
+  lawyer_response?: string;
+  response_date?: string;
+  created_at: string;
+  updated_at: string;
+  lawyer?: Partial<LawyerProfile>;
+  client?: { full_name?: string; email?: string };
+}
+
+export interface LawyerDashboardStats {
+  lawyer_user_id: string;
+  total_requests: number;
+  pending_requests: number;
+  accepted_consultations: number;
+  completed_consultations: number;
+  active_clients: number;
+  shared_cases: number;
+}
+
+export const registerLawyer = (payload: {
+  full_name: string;
+  phone?: string;
+  bar_council: string;
+  enrollment_state: string;
+  enrollment_number: string;
+  years_of_practice?: number;
+  specializations?: string[];
+  courts?: string[];
+  languages?: string[];
+  bio?: string;
+  consultation_preferences?: Record<string, any>;
+  photo_url?: string;
+}) => api.post('/api/lawyer/register', payload).then(r => r.data);
+
+export const getVerifiedLawyers = (params?: {
+  specialization?: string;
+  state?: string;
+  court?: string;
+  language?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}) => {
+  const query = new URLSearchParams();
+  if (params?.specialization) query.set('specialization', params.specialization);
+  if (params?.state) query.set('state', params.state);
+  if (params?.court) query.set('court', params.court);
+  if (params?.language) query.set('language', params.language);
+  if (params?.search) query.set('search', params.search);
+  if (params?.limit) query.set('limit', String(params.limit));
+  if (params?.offset) query.set('offset', String(params.offset));
+  const qs = query.toString();
+  return api.get(`/api/lawyers${qs ? `?${qs}` : ''}`).then(r => r.data);
+};
+
+export const getLawyerProfile = (lawyerId: string) =>
+  api.get(`/api/lawyers/${encodeURIComponent(lawyerId)}`).then(r => r.data);
+
+export const updateLawyerProfile = (payload: Partial<LawyerProfile>) =>
+  api.patch('/api/lawyer/profile', payload).then(r => r.data);
+
+export const verifyLawyer = (lawyerId: string, decision: 'VERIFIED' | 'REJECTED' | 'SUSPENDED', notes?: string) =>
+  api.post(`/api/admin/lawyers/${encodeURIComponent(lawyerId)}/verify`, { decision, notes }).then(r => r.data);
+
+export const requestConsultation = (payload: {
+  lawyer_user_id: string;
+  case_id?: string;
+  legal_issue: string;
+  description: string;
+  preferred_mode?: string;
+}) => api.post('/api/consultations/request', payload).then(r => r.data);
+
+export const getCitizenConsultations = () =>
+  api.get('/api/citizen/consultations').then(r => r.data);
+
+export const getLawyerConsultations = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+  return api.get(`/api/lawyer/consultations${qs}`).then(r => r.data);
+};
+
+export const updateConsultationStatus = (requestId: string, payload: { status: string; lawyer_response?: string }) =>
+  api.patch(`/api/consultations/${encodeURIComponent(requestId)}/status`, payload).then(r => r.data);
+
+export const shareCaseWithLawyer = (payload: {
+  case_id: string;
+  lawyer_user_id: string;
+  shared_scope?: string;
+  consultation_request_id?: string;
+}) => api.post('/api/citizen/cases/share', payload).then(r => r.data);
+
+export const revokeLawyerCaseAccess = (payload: {
+  case_id: string;
+  lawyer_user_id: string;
+}) => api.post('/api/citizen/cases/revoke-share', payload).then(r => r.data);
+
+export const getLawyerSharedCases = () =>
+  api.get('/api/lawyer/shared-cases').then(r => r.data);
+
+export const getLawyerDashboardStats = () =>
+  api.get('/api/lawyer/dashboard-stats').then(r => r.data);
+
 

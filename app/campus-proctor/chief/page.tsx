@@ -177,7 +177,7 @@ export default function ChiefProctorWorkspace() {
               <div>
                 <div className="flex items-center gap-2">
                   <h1 className="text-2xl font-black text-slate-900 tracking-tight">
-                    Chief Proctor & Ombudsman Workspace
+                    Chief Proctor Workspace
                   </h1>
                   <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-200">
                     CHIEF PROCTOR

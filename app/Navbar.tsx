@@ -37,6 +37,7 @@ export default function Navbar() {
   const router = useRouter();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [isLawyer, setIsLawyer] = useState(false);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [notifications, setNotifications] = useState<CaseNotification[]>([]);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -47,10 +48,25 @@ export default function Navbar() {
     if (typeof window !== "undefined") {
       const token =
         localStorage.getItem("nyaypath_citizen_token") ||
+        localStorage.getItem("nyaypath_lawyer_token") ||
         localStorage.getItem("nyaypath_token") ||
         localStorage.getItem("nyaypath_proctor_token");
       const logged = !!token;
       setIsLoggedIn(logged);
+
+      const userRole = localStorage.getItem("nyaypath_user_role");
+      let isL = userRole === "lawyer" || !!localStorage.getItem("nyaypath_lawyer_token");
+      if (!isL) {
+        try {
+          const userStr = localStorage.getItem("nyaypath_user");
+          if (userStr) {
+            const u = JSON.parse(userStr);
+            if (u.role === "lawyer") isL = true;
+          }
+        } catch {}
+      }
+      setIsLawyer(isL);
+
       if (logged) {
         fetchUnreadCount();
       }
@@ -183,10 +199,11 @@ export default function Navbar() {
   const navLinks = [
     { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { name: "My Cases", href: "/dashboard/my-cases", icon: Briefcase },
+    { name: "Advocates", href: "/lawyers", icon: Scale },
+    ...(isLawyer ? [{ name: "Lawyer Desk", href: "/lawyer/dashboard", icon: Gavel }] : []),
     { name: "College Proctor", href: "/campus-proctor", icon: GraduationCap },
     { name: "Institution", href: "/institution/dashboard", icon: Building },
     { name: "Case Search", href: "/case-search", icon: BookOpen },
-    { name: "Court News", href: "/court-news", icon: Newspaper },
     { name: "Track SLA", href: "/track", icon: Clock },
   ];
 

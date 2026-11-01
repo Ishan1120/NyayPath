@@ -931,10 +931,27 @@ class CitizenWorkspaceManager:
                 detail="Case not found. Please verify the Case ID."
             )
 
-        # Strict ownership verification
+        # Strict ownership verification or authorized lawyer access (Phase 5)
         owner_id = self._get_owner_id(case)
+        is_owner = (owner_id == user.user_id)
+        is_authorized_lawyer = False
 
-        if owner_id != user.user_id:
+        if not is_owner and user.role == UserRole.LAWYER:
+            if self.supabase and case.get("id"):
+                try:
+                    res_acc = self.supabase.table("lawyer_case_access").select("id").eq(
+                        "case_uuid", case["id"]
+                    ).eq(
+                        "lawyer_user_id", user.user_id
+                    ).eq(
+                        "access_status", "ACTIVE"
+                    ).execute()
+                    if res_acc.data and len(res_acc.data) > 0:
+                        is_authorized_lawyer = True
+                except Exception as e_acc:
+                    logger.warning(f"Error checking lawyer_case_access: {e_acc}")
+
+        if not is_owner and not is_authorized_lawyer:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied: You do not have permission to view this case."
@@ -942,9 +959,16 @@ class CitizenWorkspaceManager:
 
         # Sanitize case: Strip confidential internal proctor notes
         sanitized_case = dict(case)
-        sanitized_case.pop("proctor_notes", None)  # STRICTLY HIDDEN FROM CITIZENS
+        sanitized_case.pop("proctor_notes", None)  # STRICTLY HIDDEN FROM CITIZENS AND ADVOCATES
         sanitized_case.pop("verification_key_hash", None)
+        sanitized_case.pop("tracking_key_hash", None)
         sanitized_case.pop("key_version", None)
+        if isinstance(sanitized_case.get("data"), dict):
+            sanitized_case["data"] = dict(sanitized_case["data"])
+            sanitized_case["data"].pop("proctor_notes", None)
+            sanitized_case["data"].pop("verification_key_hash", None)
+            sanitized_case["data"].pop("tracking_key_hash", None)
+            sanitized_case["data"].pop("key_version", None)
 
         # Build activity timeline
         timeline = self._build_case_timeline(sanitized_case)
