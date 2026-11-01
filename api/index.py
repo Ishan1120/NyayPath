@@ -51,7 +51,9 @@ try:
         ProctorUpdateStatus,
         StudentTrackingRequest,
         CaseCommitteeAssignRequest,
-        CaseCommitteeRevokeRequest
+        CaseCommitteeRevokeRequest,
+        InstitutionMemberStatusUpdate,
+        CommitteeObservationRequest
     )
     from .document_access import DocumentAccessManager
     from .citizen_workspace import (
@@ -102,7 +104,9 @@ except ImportError:
         ProctorUpdateStatus,
         StudentTrackingRequest,
         CaseCommitteeAssignRequest,
-        CaseCommitteeRevokeRequest
+        CaseCommitteeRevokeRequest,
+        InstitutionMemberStatusUpdate,
+        CommitteeObservationRequest
     )
     from document_access import DocumentAccessManager
     from citizen_workspace import (
@@ -1186,6 +1190,144 @@ def get_case_document_url(
         tracking_key=key,
         client_ip=client_ip,
         ttl=effective_ttl
+    )
+    return result
+
+
+# =====================================================================
+# Phase 4: Institution Administrator & Proctor Workspace Endpoints
+# =====================================================================
+
+@app.get("/api/institution/dashboard-stats")
+def get_institution_dashboard_stats_endpoint(request: Request):
+    """
+    Retrieves real-time statistics for the administrator's institution.
+    Restricted to Institution Admins, Chief Proctors, or Platform Admins.
+    """
+    user = get_current_authenticated_user(request)
+    stats = campus_proctor_manager.get_institution_dashboard_stats(user)
+    return {"status": "success", "stats": stats}
+
+
+@app.get("/api/institution/analytics")
+def get_institution_analytics_endpoint(request: Request):
+    """
+    Retrieves breakdown analytics for the administrator's institution.
+    Restricted to Institution Admins, Chief Proctors, or Platform Admins.
+    """
+    user = get_current_authenticated_user(request)
+    analytics = campus_proctor_manager.get_institution_analytics(user)
+    return {"status": "success", "analytics": analytics}
+
+
+@app.get("/api/institution/cases")
+def list_institution_cases_endpoint(
+    request: Request,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    severity: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    Lists grievances in the administrator's institution with filtering and pagination.
+    Enforces cross-institution isolation.
+    """
+    user = get_current_authenticated_user(request)
+    data = campus_proctor_manager.list_institution_cases(
+        officer_user=user,
+        status_filter=status,
+        category_filter=category,
+        severity_filter=severity,
+        search=search,
+        limit=limit,
+        offset=offset
+    )
+    return data
+
+
+@app.get("/api/institution/members")
+def list_institution_members_endpoint(request: Request):
+    """
+    Lists members registered under the administrator's institution.
+    """
+    user = get_current_authenticated_user(request)
+    members = campus_proctor_manager.list_institution_members(user)
+    return {"members": members, "institution_id": user.institution_id}
+
+
+@app.patch("/api/institution/members/{user_id}/status")
+def update_institution_member_status_endpoint(
+    user_id: str,
+    payload: InstitutionMemberStatusUpdate,
+    request: Request
+):
+    """
+    Updates an institutional member's account status (active, suspended, revoked).
+    Strictly authorized for Institution Administrators or Platform Admins.
+    """
+    admin_user = get_current_authenticated_user(request)
+    result = campus_proctor_manager.update_member_status(admin_user, user_id, payload.account_status)
+    return {"status": "success", "member": result}
+
+
+@app.get("/api/institution/committee-roster")
+def get_committee_roster_endpoint(request: Request):
+    """
+    Lists active personnel available for inquiry committee assignments.
+    """
+    user = get_current_authenticated_user(request)
+    all_members = campus_proctor_manager.list_institution_members(user)
+    eligible = [
+        m for m in all_members
+        if m.get("account_status") == "active" and m.get("role") in ["committee_member", "proctor", "chief_proctor"]
+    ]
+    return {"roster": eligible, "institution_id": user.institution_id}
+
+
+@app.get("/api/campus-proctor/chief/triage")
+def get_chief_triage_queue_endpoint(request: Request):
+    """
+    Lists unassigned grievances requiring triage by Chief Proctor.
+    """
+    user = get_current_authenticated_user(request)
+    unassigned = campus_proctor_manager.list_unassigned_cases(user)
+    return {"cases": unassigned, "institution_id": user.institution_id}
+
+
+@app.get("/api/campus-proctor/my-cases")
+def get_proctor_assigned_cases_endpoint(request: Request):
+    """
+    Lists cases specifically assigned to this proctor.
+    """
+    user = get_current_authenticated_user(request)
+    assigned = campus_proctor_manager.list_assigned_cases_for_proctor(user)
+    return {"cases": assigned, "proctor_user_id": user.user_id}
+
+
+@app.get("/api/campus-proctor/committee/my-inquiries")
+def get_committee_inquiries_endpoint(request: Request):
+    """
+    Lists confidential inquiries actively assigned to this committee member.
+    """
+    user = get_current_authenticated_user(request)
+    inquiries = campus_proctor_manager.list_committee_inquiries(user)
+    return {"inquiries": inquiries, "user_id": user.user_id}
+
+
+@app.post("/api/campus-proctor/committee/observations")
+def add_committee_observations_endpoint(payload: CommitteeObservationRequest, request: Request):
+    """
+    Records observations, findings, and recommendations for an assigned inquiry case.
+    """
+    user = get_current_authenticated_user(request)
+    result = campus_proctor_manager.add_committee_observation(
+        case_id=payload.case_id,
+        observations=payload.observations,
+        recommendations=payload.recommendations,
+        findings=payload.findings,
+        member_user=user
     )
     return result
 

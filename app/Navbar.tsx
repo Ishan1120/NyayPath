@@ -21,7 +21,8 @@ import {
   CheckCheck,
   ExternalLink,
   FileText,
-  AlertCircle
+  AlertCircle,
+  Building
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -182,8 +183,9 @@ export default function Navbar() {
   const navLinks = [
     { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
     { name: "My Cases", href: "/dashboard/my-cases", icon: Briefcase },
-    { name: "Case Search", href: "/case-search", icon: BookOpen },
     { name: "College Proctor", href: "/campus-proctor", icon: GraduationCap },
+    { name: "Institution", href: "/institution/dashboard", icon: Building },
+    { name: "Case Search", href: "/case-search", icon: BookOpen },
     { name: "Court News", href: "/court-news", icon: Newspaper },
     { name: "Track SLA", href: "/track", icon: Clock },
   ];

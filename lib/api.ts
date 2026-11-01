@@ -308,3 +308,112 @@ export const triggerBlobDownload = (blobData: Blob, filename: string) => {
   link.parentNode?.removeChild(link);
   window.URL.revokeObjectURL(url);
 };
+
+// =====================================================================
+// Multi-Institution & Proctor Workspace API (Phase 4)
+// =====================================================================
+
+export interface InstitutionStats {
+  institution_id: string;
+  total_cases: number;
+  active_inquiries: number;
+  resolved_cases: number;
+  hearings_scheduled: number;
+  confidential_cases: number;
+  sla_breaches: number;
+  total_members: number;
+  active_members: number;
+  unassigned_cases: number;
+}
+
+export interface InstitutionAnalytics {
+  institution_id: string;
+  total_cases: number;
+  by_category: Record<string, number>;
+  by_severity: Record<string, number>;
+  by_status: Record<string, number>;
+  avg_resolution_days: number;
+  resolved_count: number;
+}
+
+export interface InstitutionMember {
+  id: string;
+  user_id: string;
+  institution_code: string;
+  role: string;
+  department?: string;
+  designation?: string;
+  account_status: 'active' | 'suspended' | 'revoked';
+  full_name?: string;
+  email?: string;
+  created_at: string;
+}
+
+export interface CommitteeObservationPayload {
+  case_id: string;
+  observations: string;
+  recommendations?: string;
+  findings?: string;
+}
+
+export const getInstitutionDashboardStats = () =>
+  api.get('/api/institution/dashboard-stats').then(r => r.data);
+
+export const getInstitutionAnalytics = () =>
+  api.get('/api/institution/analytics').then(r => r.data);
+
+export const getInstitutionCases = (params?: {
+  status?: string;
+  category?: string;
+  severity?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}) => {
+  const query = new URLSearchParams();
+  if (params?.status) query.set('status', params.status);
+  if (params?.category) query.set('category', params.category);
+  if (params?.severity) query.set('severity', params.severity);
+  if (params?.search) query.set('search', params.search);
+  if (params?.limit) query.set('limit', String(params.limit));
+  if (params?.offset) query.set('offset', String(params.offset));
+  const qs = query.toString();
+  return api.get(`/api/institution/cases${qs ? `?${qs}` : ''}`).then(r => r.data);
+};
+
+export const getInstitutionMembers = () =>
+  api.get('/api/institution/members').then(r => r.data);
+
+export const updateInstitutionMemberStatus = (userId: string, accountStatus: string) =>
+  api.patch(`/api/institution/members/${encodeURIComponent(userId)}/status`, { account_status: accountStatus }).then(r => r.data);
+
+export const getInstitutionCommitteeRoster = () =>
+  api.get('/api/institution/committee-roster').then(r => r.data);
+
+export const getChiefTriageQueue = () =>
+  api.get('/api/campus-proctor/chief/triage').then(r => r.data);
+
+export const getProctorMyCases = () =>
+  api.get('/api/campus-proctor/my-cases').then(r => r.data);
+
+export const getCommitteeInquiries = () =>
+  api.get('/api/campus-proctor/committee/my-inquiries').then(r => r.data);
+
+export const assignCaseCommitteeMember = (payload: {
+  case_id: string;
+  target_user_id: string;
+  role?: string;
+  committee_name?: string;
+}) => api.post('/api/campus-proctor/committee/assign', payload).then(r => r.data);
+
+export const revokeCaseCommitteeMember = (payload: {
+  case_id: string;
+  target_user_id: string;
+}) => api.post('/api/campus-proctor/committee/revoke', payload).then(r => r.data);
+
+export const getCaseCommitteeAssignments = (caseId: string) =>
+  api.get(`/api/campus-proctor/committee/assignments/${encodeURIComponent(caseId)}`).then(r => r.data);
+
+export const submitCommitteeObservations = (payload: CommitteeObservationPayload) =>
+  api.post('/api/campus-proctor/committee/observations', payload).then(r => r.data);
+

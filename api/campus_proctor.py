@@ -97,6 +97,15 @@ class CaseCommitteeRevokeRequest(BaseModel):
     case_id: str
     target_user_id: str
 
+class InstitutionMemberStatusUpdate(BaseModel):
+    account_status: str
+
+class CommitteeObservationRequest(BaseModel):
+    case_id: str
+    observations: str
+    recommendations: Optional[str] = ""
+    findings: Optional[str] = ""
+
 # Permitted state machine transitions for campus grievances (Task 2 & 4)
 PERMITTED_STATUS_TRANSITIONS: Dict[str, set] = {
     "SUBMITTED": {"UNDER_INQUIRY", "UNDER_REVIEW", "HEARING_SCHEDULED", "ACTION_TAKEN", "RESOLVED", "CLOSED"},
@@ -691,7 +700,7 @@ class CampusProctorManager:
         except ImportError:
             from audit import record_case_activity
 
-        record_case_activity(
+        act_rec = record_case_activity(
             case_uuid=case.get("id"),
             case_id=clean_id,
             action_type=f"STATUS_TRANSITION_{new_status}",
@@ -708,8 +717,9 @@ class CampusProctorManager:
             actor_type="USER",
             supabase_client=self.supabase
         )
+        activity_id = (act_rec.get("id") if isinstance(act_rec, dict) else None) or str(uuid.uuid4())
 
-        # Dispatch In-App Notifications (Phase 2.3)
+        # Dispatch In-App Notifications (Phase 2.3 & 4: Immutable activity_id idempotency)
         try:
             from .notifications import notification_manager
         except ImportError:
@@ -736,7 +746,7 @@ class CampusProctorManager:
                             related_case_id=clean_id,
                             case_uuid=case.get("id"),
                             action_url=f"/dashboard/my-cases/{clean_id}",
-                            idempotency_key=f"notif_{student_uid}_{new_status}_{clean_id}"
+                            idempotency_key=f"notif_act_{activity_id}_status_{student_uid}"
                         )
 
                     # Hearing Scheduled Notification
@@ -749,7 +759,7 @@ class CampusProctorManager:
                             related_case_id=clean_id,
                             case_uuid=case.get("id"),
                             action_url=f"/dashboard/my-cases/{clean_id}",
-                            idempotency_key=f"notif_{student_uid}_HEARING_{clean_id}_{validated_hearing_date}"
+                            idempotency_key=f"notif_act_{activity_id}_hearing_{student_uid}"
                         )
 
                 # Proctor Assigned Notification
@@ -761,8 +771,8 @@ class CampusProctorManager:
                         message=f"You have been assigned as the presiding officer for case {clean_id}.",
                         related_case_id=clean_id,
                         case_uuid=case.get("id"),
-                        action_url=f"/campus-proctor?case_id={clean_id}",
-                        idempotency_key=f"notif_{payload.assigned_proctor_user_id}_ASSIGNED_{clean_id}"
+                        action_url=f"/campus-proctor/dashboard?case_id={clean_id}",
+                        idempotency_key=f"notif_act_{activity_id}_assign_{payload.assigned_proctor_user_id}"
                     )
             except Exception as e_notif:
                 logger.warning(f"Error dispatching status update notifications: {e_notif}")
@@ -997,7 +1007,7 @@ Campus Grievance Redressal Committee (SGRC)
         except ImportError:
             from audit import record_case_activity
 
-        record_case_activity(
+        act_rec = record_case_activity(
             case_uuid=case.get("id"),
             case_id=clean_id,
             action_type="COMMITTEE_ASSIGNMENT_PROVISIONED",
@@ -1010,6 +1020,26 @@ Campus Grievance Redressal Committee (SGRC)
             actor_type="USER",
             supabase_client=self.supabase
         )
+        activity_id = (act_rec.get("id") if isinstance(act_rec, dict) else None) or str(uuid.uuid4())
+
+        # Dispatch In-App Notification (Phase 2.3 & 4)
+        try:
+            from .notifications import notification_manager
+        except ImportError:
+            from notifications import notification_manager
+        try:
+            notification_manager.create_notification(
+                recipient_user_id=target_user_id,
+                event_type="COMMITTEE_ASSIGNED",
+                title="Appointed to Inquiry Committee",
+                message=f"You have been appointed to the inquiry committee for case {clean_id}.",
+                related_case_id=clean_id,
+                case_uuid=case.get("id"),
+                action_url=f"/campus-proctor/committee?case_id={clean_id}",
+                idempotency_key=f"notif_act_{activity_id}_comm_{target_user_id}"
+            )
+        except Exception as e_notif:
+            logger.warning(f"Error dispatching committee assignment notification: {e_notif}")
 
         return assignment_record
 
@@ -1073,7 +1103,7 @@ Campus Grievance Redressal Committee (SGRC)
         except ImportError:
             from audit import record_case_activity
 
-        record_case_activity(
+        act_rec = record_case_activity(
             case_uuid=case.get("id"),
             case_id=clean_id,
             action_type="COMMITTEE_ASSIGNMENT_REVOKED",
@@ -1082,6 +1112,26 @@ Campus Grievance Redressal Committee (SGRC)
             actor_type="USER",
             supabase_client=self.supabase
         )
+        activity_id = (act_rec.get("id") if isinstance(act_rec, dict) else None) or str(uuid.uuid4())
+
+        # Dispatch In-App Notification (Phase 2.3 & 4)
+        try:
+            from .notifications import notification_manager
+        except ImportError:
+            from notifications import notification_manager
+        try:
+            notification_manager.create_notification(
+                recipient_user_id=target_user_id,
+                event_type="COMMITTEE_REVOKED",
+                title="Committee Assignment Revoked",
+                message=f"Your appointment to the inquiry committee for case {clean_id} has been revoked.",
+                related_case_id=clean_id,
+                case_uuid=case.get("id"),
+                action_url="/campus-proctor/committee",
+                idempotency_key=f"notif_act_{activity_id}_comm_rev_{target_user_id}"
+            )
+        except Exception as e_notif:
+            logger.warning(f"Error dispatching committee revocation notification: {e_notif}")
 
         return revoked_record
 
@@ -1117,6 +1167,622 @@ Campus Grievance Redressal Committee (SGRC)
                 logger.error(f"Error listing committee assignments: {e}")
                 return []
         return []
+
+    # -----------------------------------------------------------------
+    # Institution Administrator & Proctor Methods (Phase 4)
+    # -----------------------------------------------------------------
+    def get_institution_dashboard_stats(self, officer_user: AuthUser) -> Dict[str, Any]:
+        """
+        Computes real-time dashboard statistics derived from actual DB records for the officer's institution.
+        Accessible by Institution Administrators, Chief Proctors, or Platform Admins.
+        """
+        if not officer_user or getattr(officer_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive or token is invalid."
+            )
+
+        if officer_user.role not in [UserRole.INSTITUTION_ADMIN, UserRole.CHIEF_PROCTOR, UserRole.PLATFORM_ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Only Institution Administrators, Chief Proctors, or Platform Admins may view institution dashboard stats."
+            )
+
+        inst_id = officer_user.institution_id
+        self._ensure_connected()
+
+        stats = {
+            "institution_id": inst_id,
+            "total_cases": 0,
+            "active_inquiries": 0,
+            "resolved_cases": 0,
+            "hearings_scheduled": 0,
+            "confidential_cases": 0,
+            "sla_breaches": 0,
+            "total_members": 0,
+            "active_members": 0,
+            "unassigned_cases": 0,
+        }
+
+        if self.use_supabase and self.supabase:
+            try:
+                query = self.supabase.table("campus_cases").select(
+                    "id, case_id, status, severity, category, confidentiality_mode, hearing_date, assigned_proctor, assigned_proctor_user_id, created_at, resolution_deadline"
+                )
+                if officer_user.role != UserRole.PLATFORM_ADMIN:
+                    query = query.eq("institution_id", inst_id)
+                res = query.execute()
+                cases = res.data or []
+
+                stats["total_cases"] = len(cases)
+                now_dt = datetime.now(timezone.utc)
+
+                for c in cases:
+                    st = (c.get("status") or "").upper()
+                    if st in ["SUBMITTED", "UNDER_INQUIRY", "UNDER_REVIEW", "HEARING_SCHEDULED", "ACTION_TAKEN"]:
+                        stats["active_inquiries"] += 1
+                    elif st in ["RESOLVED", "CLOSED"]:
+                        stats["resolved_cases"] += 1
+
+                    if st == "HEARING_SCHEDULED" or c.get("hearing_date"):
+                        stats["hearings_scheduled"] += 1
+
+                    if c.get("confidentiality_mode") in ["CONFIDENTIAL", "STRICT_CONFIDENTIAL"]:
+                        stats["confidential_cases"] += 1
+
+                    if not c.get("assigned_proctor") and not c.get("assigned_proctor_user_id"):
+                        stats["unassigned_cases"] += 1
+
+                    if st not in ["RESOLVED", "CLOSED"]:
+                        created_str = c.get("created_at")
+                        if created_str:
+                            try:
+                                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                                if (now_dt - created_dt).days >= 15:
+                                    stats["sla_breaches"] += 1
+                            except Exception:
+                                pass
+
+                m_query = self.supabase.table("institution_memberships").select("id, account_status, role")
+                if officer_user.role != UserRole.PLATFORM_ADMIN:
+                    m_query = m_query.eq("institution_code", inst_id)
+                m_res = m_query.execute()
+                members = m_res.data or []
+                stats["total_members"] = len(members)
+                stats["active_members"] = sum(1 for m in members if m.get("account_status") == "active")
+
+            except Exception as e:
+                logger.error(f"Error computing dashboard stats in Supabase: {e}")
+                raise HTTPException(status_code=500, detail="Failed to calculate institution statistics.")
+        else:
+            cases = self._list_cases_sqlite(inst_id, is_admin=(officer_user.role == UserRole.PLATFORM_ADMIN))
+            stats["total_cases"] = len(cases)
+            for c in cases:
+                st = (c.get("status") or "").upper()
+                if st in ["SUBMITTED", "UNDER_INQUIRY", "UNDER_REVIEW", "HEARING_SCHEDULED", "ACTION_TAKEN"]:
+                    stats["active_inquiries"] += 1
+                elif st in ["RESOLVED", "CLOSED"]:
+                    stats["resolved_cases"] += 1
+                if st == "HEARING_SCHEDULED" or c.get("hearing_date"):
+                    stats["hearings_scheduled"] += 1
+                if c.get("confidentiality_mode") in ["CONFIDENTIAL", "STRICT_CONFIDENTIAL"]:
+                    stats["confidential_cases"] += 1
+                if not c.get("assigned_proctor"):
+                    stats["unassigned_cases"] += 1
+
+        return stats
+
+    def get_institution_analytics(self, officer_user: AuthUser) -> Dict[str, Any]:
+        """
+        Provides detailed breakdown analytics (category, severity, status, resolution trends)
+        for the officer's institution derived from actual database records.
+        """
+        if not officer_user or getattr(officer_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive or token is invalid."
+            )
+
+        if officer_user.role not in [UserRole.INSTITUTION_ADMIN, UserRole.CHIEF_PROCTOR, UserRole.PLATFORM_ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Only Institution Administrators, Chief Proctors, or Platform Admins may view institution analytics."
+            )
+
+        inst_id = officer_user.institution_id
+        self._ensure_connected()
+
+        if self.use_supabase and self.supabase:
+            try:
+                query = self.supabase.table("campus_cases").select(
+                    "id, case_id, status, severity, category, created_at, updated_at, hearing_date"
+                )
+                if officer_user.role != UserRole.PLATFORM_ADMIN:
+                    query = query.eq("institution_id", inst_id)
+                res = query.execute()
+                cases = res.data or []
+            except Exception as e:
+                logger.error(f"Error fetching analytics data from Supabase: {e}")
+                raise HTTPException(status_code=500, detail="Failed to retrieve analytics data.")
+        else:
+            cases = self._list_cases_sqlite(inst_id, is_admin=(officer_user.role == UserRole.PLATFORM_ADMIN))
+
+        by_category: Dict[str, int] = {}
+        by_severity: Dict[str, int] = {}
+        by_status: Dict[str, int] = {}
+        resolution_durations_days: List[float] = []
+
+        for c in cases:
+            cat = c.get("category") or "OTHER"
+            by_category[cat] = by_category.get(cat, 0) + 1
+
+            sev = c.get("severity") or "MEDIUM"
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+
+            st = c.get("status") or "SUBMITTED"
+            by_status[st] = by_status.get(st, 0) + 1
+
+            if st in ["RESOLVED", "CLOSED"] and c.get("created_at") and c.get("updated_at"):
+                try:
+                    c_dt = datetime.fromisoformat(c["created_at"].replace("Z", "+00:00"))
+                    u_dt = datetime.fromisoformat(c["updated_at"].replace("Z", "+00:00"))
+                    diff_days = max(0.0, (u_dt - c_dt).total_seconds() / 86400.0)
+                    resolution_durations_days.append(diff_days)
+                except Exception:
+                    pass
+
+        avg_resolution_days = round(sum(resolution_durations_days) / len(resolution_durations_days), 1) if resolution_durations_days else 0.0
+
+        return {
+            "institution_id": inst_id,
+            "total_cases": len(cases),
+            "by_category": by_category,
+            "by_severity": by_severity,
+            "by_status": by_status,
+            "avg_resolution_days": avg_resolution_days,
+            "resolved_count": len(resolution_durations_days)
+        }
+
+    def list_institution_cases(
+        self,
+        officer_user: AuthUser,
+        status_filter: Optional[str] = None,
+        category_filter: Optional[str] = None,
+        severity_filter: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Retrieves paginated and filtered cases for the officer's institution.
+        Enforces cross-institution isolation.
+        """
+        if not officer_user or getattr(officer_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive or token is invalid."
+            )
+
+        if officer_user.role not in [UserRole.INSTITUTION_ADMIN, UserRole.CHIEF_PROCTOR, UserRole.PLATFORM_ADMIN, UserRole.PROCTOR]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Only authorized institutional personnel may view institutional cases."
+            )
+
+        inst_id = officer_user.institution_id
+        self._ensure_connected()
+
+        if self.use_supabase and self.supabase:
+            try:
+                query = self.supabase.table("campus_cases").select("*", count="exact")
+                if officer_user.role != UserRole.PLATFORM_ADMIN:
+                    query = query.eq("institution_id", inst_id)
+
+                if status_filter:
+                    query = query.eq("status", status_filter.strip().upper())
+                if category_filter:
+                    query = query.eq("category", category_filter.strip())
+                if severity_filter:
+                    query = query.eq("severity", severity_filter.strip().upper())
+                if search:
+                    query = query.or_(f"case_id.ilike.%{search}%,subject.ilike.%{search}%")
+
+                query = query.order("created_at", desc=True)
+                query = query.range(offset, offset + limit - 1)
+                res = query.execute()
+
+                cases = res.data or []
+                total_count = res.count if hasattr(res, "count") and res.count is not None else len(cases)
+                for c in cases:
+                    c.pop("verification_key_hash", None)
+
+                return {
+                    "cases": cases,
+                    "total": total_count,
+                    "limit": limit,
+                    "offset": offset,
+                    "institution_id": inst_id
+                }
+            except Exception as e:
+                logger.error(f"Error listing institution cases: {e}")
+                raise HTTPException(status_code=500, detail="Failed to retrieve institution cases.")
+        else:
+            all_cases = self._list_cases_sqlite(inst_id, is_admin=(officer_user.role == UserRole.PLATFORM_ADMIN))
+            filtered = all_cases
+            if status_filter:
+                filtered = [c for c in filtered if (c.get("status") or "").upper() == status_filter.strip().upper()]
+            if category_filter:
+                filtered = [c for c in filtered if (c.get("category") or "").upper() == category_filter.strip().upper()]
+            if severity_filter:
+                filtered = [c for c in filtered if (c.get("severity") or "").upper() == severity_filter.strip().upper()]
+            if search:
+                s = search.lower()
+                filtered = [c for c in filtered if s in (c.get("case_id") or "").lower() or s in (c.get("subject") or "").lower()]
+
+            total_count = len(filtered)
+            paginated = filtered[offset : offset + limit]
+            for c in paginated:
+                c.pop("verification_key_hash", None)
+
+            return {
+                "cases": paginated,
+                "total": total_count,
+                "limit": limit,
+                "offset": offset,
+                "institution_id": inst_id
+            }
+
+    def list_institution_members(self, officer_user: AuthUser) -> List[Dict[str, Any]]:
+        """
+        Lists registered officers and committee members for the administrator's institution.
+        """
+        if not officer_user or getattr(officer_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive or token is invalid."
+            )
+
+        if officer_user.role not in [UserRole.INSTITUTION_ADMIN, UserRole.CHIEF_PROCTOR, UserRole.PLATFORM_ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Only Institution Administrators, Chief Proctors, or Platform Admins may view member rosters."
+            )
+
+        inst_id = officer_user.institution_id
+        if self.use_supabase and self.supabase:
+            try:
+                query = self.supabase.table("institution_memberships").select(
+                    "id, user_id, institution_id, institution_code, role, account_status, created_at, updated_at"
+                )
+                if officer_user.role != UserRole.PLATFORM_ADMIN:
+                    query = query.eq("institution_code", inst_id)
+                res = query.execute()
+                members = res.data or []
+
+                user_ids = [m["user_id"] for m in members if m.get("user_id")]
+                profile_map = {}
+                if user_ids:
+                    p_res = self.supabase.table("profiles").select("id, email, full_name").in_("id", user_ids).execute()
+                    for p in (p_res.data or []):
+                        profile_map[p["id"]] = p
+
+                for m in members:
+                    uid = m.get("user_id")
+                    if uid in profile_map:
+                        m["full_name"] = profile_map[uid].get("full_name") or "Institutional Officer"
+                        m["email"] = profile_map[uid].get("email") or ""
+                    else:
+                        m["full_name"] = "Institutional Officer"
+                        m["email"] = ""
+
+                return members
+            except Exception as e:
+                logger.error(f"Error listing institution members: {e}")
+                raise HTTPException(status_code=500, detail="Failed to retrieve institution members.")
+        return []
+
+    def update_member_status(self, admin_user: AuthUser, target_user_id: str, new_status: str) -> Dict[str, Any]:
+        """
+        Updates an institution member's account status (active, suspended, revoked).
+        Strictly restricted to Institution Administrators or Platform Admins.
+        Enforces cross-institution isolation (target must belong to admin's institution).
+        """
+        if not admin_user or getattr(admin_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Admin account is inactive or token is invalid."
+            )
+
+        if admin_user.role not in [UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Only Institution Administrators or Platform Admins may update member account statuses."
+            )
+
+        valid_statuses = ["active", "suspended", "revoked"]
+        norm_status = new_status.strip().lower()
+        if norm_status not in valid_statuses:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status '{new_status}'. Permitted: {valid_statuses}."
+            )
+
+        if self.use_supabase and self.supabase:
+            try:
+                query = self.supabase.table("institution_memberships").select("*").eq("user_id", target_user_id)
+                if admin_user.role != UserRole.PLATFORM_ADMIN:
+                    query = query.eq("institution_code", admin_user.institution_id)
+                res = query.execute()
+                if not res.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Member not found in your institution."
+                    )
+                membership = res.data[0]
+
+                upd_res = self.supabase.table("institution_memberships").update({
+                    "account_status": norm_status,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", membership["id"]).execute()
+
+                try:
+                    self.supabase.table("profiles").update({
+                        "account_status": norm_status,
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }).eq("id", target_user_id).execute()
+                except Exception as ep:
+                    logger.warning(f"Error updating profiles account_status: {ep}")
+
+                return upd_res.data[0] if upd_res.data else {"user_id": target_user_id, "account_status": norm_status}
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error updating member status: {e}")
+                raise HTTPException(status_code=500, detail="Database update failed for member status.")
+        return {"user_id": target_user_id, "account_status": norm_status}
+
+    def list_unassigned_cases(self, chief_user: AuthUser) -> List[Dict[str, Any]]:
+        """
+        Lists grievances in the chief proctor's institution that have not yet been assigned to an individual proctor.
+        Authorized for Chief Proctors, Institution Admins, or Platform Admins.
+        """
+        if not chief_user or getattr(chief_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive or token is invalid."
+            )
+
+        if chief_user.role not in [UserRole.CHIEF_PROCTOR, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Only Chief Proctors or Administrators may view unassigned triage queue."
+            )
+
+        self._ensure_connected()
+        inst_id = chief_user.institution_id
+
+        if self.use_supabase and self.supabase:
+            try:
+                query = self.supabase.table("campus_cases").select("*").order("created_at", desc=True)
+                if chief_user.role != UserRole.PLATFORM_ADMIN:
+                    query = query.eq("institution_id", inst_id)
+                res = query.execute()
+                cases = res.data or []
+                unassigned = [
+                    c for c in cases
+                    if not c.get("assigned_proctor") and not c.get("assigned_proctor_user_id")
+                ]
+                for c in unassigned:
+                    c.pop("verification_key_hash", None)
+                return unassigned
+            except Exception as e:
+                logger.error(f"Error fetching unassigned cases: {e}")
+                raise HTTPException(status_code=500, detail="Failed to fetch unassigned cases.")
+        else:
+            cases = self._list_cases_sqlite(inst_id, is_admin=(chief_user.role == UserRole.PLATFORM_ADMIN))
+            unassigned = [c for c in cases if not c.get("assigned_proctor")]
+            for c in unassigned:
+                c.pop("verification_key_hash", None)
+            return unassigned
+
+    def list_assigned_cases_for_proctor(self, proctor_user: AuthUser) -> List[Dict[str, Any]]:
+        """
+        Lists campus cases specifically assigned to this proctor.
+        """
+        if not proctor_user or getattr(proctor_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Officer account is inactive, suspended, or revoked."
+            )
+
+        if proctor_user.role not in [UserRole.PROCTOR, UserRole.CHIEF_PROCTOR, UserRole.INSTITUTION_ADMIN, UserRole.PLATFORM_ADMIN]:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Only proctors or administrators may view assigned inquiries."
+            )
+
+        self._ensure_connected()
+        inst_id = proctor_user.institution_id
+        uid = str(proctor_user.user_id)
+
+        if self.use_supabase and self.supabase:
+            try:
+                query = self.supabase.table("campus_cases").select("*").order("created_at", desc=True)
+                if proctor_user.role != UserRole.PLATFORM_ADMIN:
+                    query = query.eq("institution_id", inst_id)
+                res = query.execute()
+                cases = res.data or []
+                assigned_cases = []
+                for c in cases:
+                    assigned_uuid = c.get("assigned_proctor_user_id")
+                    assigned_name = c.get("assigned_proctor")
+                    if (
+                        (assigned_uuid and str(assigned_uuid).lower() == uid.lower()) or
+                        (not assigned_uuid and assigned_name and (
+                            str(assigned_name).lower() == uid.lower() or
+                            assigned_name == proctor_user.name
+                        ))
+                    ):
+                        c.pop("verification_key_hash", None)
+                        assigned_cases.append(c)
+                return assigned_cases
+            except Exception as e:
+                logger.error(f"Error fetching assigned cases for proctor: {e}")
+                raise HTTPException(status_code=500, detail="Failed to fetch assigned cases.")
+        else:
+            cases = self._list_cases_sqlite(inst_id, is_admin=(proctor_user.role == UserRole.PLATFORM_ADMIN))
+            assigned_cases = [c for c in cases if c.get("assigned_proctor") == proctor_user.name or c.get("assigned_proctor") == uid]
+            for c in assigned_cases:
+                c.pop("verification_key_hash", None)
+            return assigned_cases
+
+    def list_committee_inquiries(self, member_user: AuthUser) -> List[Dict[str, Any]]:
+        """
+        Lists only cases where the member has an active committee assignment.
+        Revoked or suspended members receive immediate denial or empty result.
+        """
+        if not member_user or getattr(member_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Committee member account is inactive, suspended, or revoked."
+            )
+
+        self._ensure_connected()
+        uid = str(member_user.user_id)
+
+        if self.use_supabase and self.supabase:
+            try:
+                # First verify active membership in institution_memberships
+                m_check = self.supabase.table("institution_memberships").select("id, account_status").eq(
+                    "user_id", uid
+                ).eq("account_status", "active").execute()
+                if not m_check.data and member_user.role != UserRole.PLATFORM_ADMIN:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: User lacks active institutional membership."
+                    )
+
+                # Query active assignments
+                asgn_res = self.supabase.table("case_committee_assignments").select(
+                    "id, case_uuid, case_id, role, committee_name, assignment_status"
+                ).eq("user_id", uid).eq("assignment_status", "active").execute()
+                active_assignments = asgn_res.data or []
+                if not active_assignments:
+                    return []
+
+                case_ids = [a["case_id"] for a in active_assignments if a.get("case_id")]
+                if not case_ids:
+                    return []
+
+                c_res = self.supabase.table("campus_cases").select("*").in_("case_id", case_ids).order("created_at", desc=True).execute()
+                cases = c_res.data or []
+                for c in cases:
+                    c.pop("verification_key_hash", None)
+                    matching_asgn = next((a for a in active_assignments if a.get("case_id") == c.get("case_id")), None)
+                    if matching_asgn:
+                        c["committee_role"] = matching_asgn.get("role")
+                        c["committee_name"] = matching_asgn.get("committee_name")
+                return cases
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Error fetching committee inquiries: {e}")
+                raise HTTPException(status_code=500, detail="Failed to fetch committee inquiries.")
+        else:
+            return []
+
+    def add_committee_observation(
+        self,
+        case_id: str,
+        observations: str,
+        recommendations: Optional[str] = "",
+        findings: Optional[str] = "",
+        member_user: Optional[AuthUser] = None
+    ) -> Dict[str, Any]:
+        """
+        Records observations, findings, and recommendations from an authorized committee member.
+        Enforces active assignment and active account status.
+        Logs immutable case activity and dispatches notifications.
+        """
+        if not member_user or getattr(member_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required: Committee member account is inactive or token is invalid."
+            )
+
+        clean_id = (case_id or "").strip().upper()
+        case = self._fetch_raw_case(clean_id)
+        if not case:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
+
+        verify_institutional_boundary(member_user, case.get("institution_id", "INST_DEFAULT"))
+
+        # Verify active committee assignment if not Platform Admin, Chief Proctor, or Institution Admin
+        if member_user.role not in [UserRole.PLATFORM_ADMIN, UserRole.CHIEF_PROCTOR, UserRole.INSTITUTION_ADMIN]:
+            if self.use_supabase and self.supabase:
+                asgn_check = self.supabase.table("case_committee_assignments").select("id").eq(
+                    "case_id", clean_id
+                ).eq("user_id", member_user.user_id).eq("assignment_status", "active").execute()
+                if not asgn_check.data:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: You do not have an active committee assignment for this case inquiry."
+                    )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        obs_record = {
+            "author_id": member_user.user_id,
+            "author_name": member_user.name or "Committee Member",
+            "observations": observations.strip(),
+            "recommendations": (recommendations or "").strip(),
+            "findings": (findings or "").strip(),
+            "recorded_at": now_iso
+        }
+
+        # Record immutable case activity
+        try:
+            from .audit import record_case_activity
+        except ImportError:
+            from audit import record_case_activity
+
+        act_rec = record_case_activity(
+            case_uuid=case.get("id"),
+            case_id=clean_id,
+            action_type="COMMITTEE_OBSERVATIONS_RECORDED",
+            action_details=obs_record,
+            actor_user=member_user,
+            actor_type="USER",
+            supabase_client=self.supabase
+        )
+        activity_id = (act_rec.get("id") if isinstance(act_rec, dict) else None) or str(uuid.uuid4())
+
+        # Notify assigned proctor if assigned
+        try:
+            from .notifications import notification_manager
+        except ImportError:
+            from notifications import notification_manager
+
+        assigned_proctor_uid = case.get("assigned_proctor_user_id")
+        if assigned_proctor_uid and str(assigned_proctor_uid).lower() != str(member_user.user_id).lower():
+            try:
+                notification_manager.create_notification(
+                    recipient_user_id=str(assigned_proctor_uid),
+                    event_type="COMMITTEE_OBSERVATIONS",
+                    title="Committee Findings Submitted",
+                    message=f"New committee observations and findings have been recorded for case {clean_id}.",
+                    related_case_id=clean_id,
+                    case_uuid=case.get("id"),
+                    action_url=f"/campus-proctor/dashboard?case_id={clean_id}",
+                    idempotency_key=f"notif_act_{activity_id}_obs_{assigned_proctor_uid}"
+                )
+            except Exception as e_notif:
+                logger.warning(f"Error dispatching committee observation notification: {e_notif}")
+
+        return {
+            "status": "success",
+            "case_id": clean_id,
+            "observation": obs_record
+        }
 
     def _list_cases_sqlite(self, institution_id: str, is_admin: bool = False) -> List[Dict[str, Any]]:
         conn = sqlite3.connect(self._local_db_path)
