@@ -41,7 +41,7 @@ import {
   MessageAttachment
 } from '@/lib/api';
 
-export default function MessagesPage() {
+function MessagesPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialConvId = searchParams.get('id');
@@ -821,4 +821,20 @@ export default function MessagesPage() {
     </div>
   );
 }
+
+export default function MessagesPage() {
+  return (
+    <React.Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center bg-gray-900 text-gray-400">
+          <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mr-3" />
+          Loading Conversations...
+        </div>
+      }
+    >
+      <MessagesPageContent />
+    </React.Suspense>
+  );
+}
+
 

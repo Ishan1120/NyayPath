@@ -187,3 +187,4 @@ NyayPath Phase 7 strictly avoided redundant tables or parallel authentication sy
 1. **Remote Supabase Migrations Deferred:** Local migration `20261102000002_platform_admin_schema.sql` was applied strictly to the local Docker database container. In accordance with strict guidelines, no remote Supabase migrations or `supabase db push` operations were executed.
 2. **Statutory Ombudsperson External Integration:** In accordance with UGC Regulations 2023, while the platform maintains tracking and appeal referral markers for the University Ombudsperson, external government portal SSO integration remains an institutional responsibility.
 3. **Automated Bar Council Sync:** Verification decisions rely on administrative inspection of Bar Council enrollment rolls via internal workflow; direct digital API access to state Bar Council databases is contingent on future Bar Council electronic interface availability.
+

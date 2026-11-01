@@ -117,3 +117,4 @@ REVOKE ALL PRIVILEGES ON FUNCTION public.admin_audit_exceptional_access(TEXT, TE
 GRANT EXECUTE ON FUNCTION public.admin_audit_exceptional_access(TEXT, TEXT, JSONB) TO authenticated, service_role;
 
 NOTIFY pgrst, 'reload schema';
+

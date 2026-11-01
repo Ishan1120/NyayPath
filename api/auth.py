@@ -1044,24 +1044,23 @@ def require_platform_admin(request: Request) -> AuthUser:
         )
 
     # Database-backed live verification if database is connected
-    sb_url = os.environ.get("SUPABASE_URL")
-    sb_key = os.environ.get("SUPABASE_SECRET_KEY")
-    if sb_url and sb_key and os.environ.get("SUPABASE_OFFLINE_TEST") != "1":
+    if os.environ.get("SUPABASE_OFFLINE_TEST") != "1":
         try:
-            from supabase import create_client
-            sb_client = create_client(sb_url, sb_key)
-            res = sb_client.table("platform_admins").select("id, account_status").eq("user_id", str(user.user_id)).execute()
-            if not res or not res.data or len(res.data) == 0:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied: No authoritative platform administrator record found."
-                )
-            status_val = (res.data[0].get("account_status") or "").strip().lower()
-            if status_val != "active":
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Access denied: Platform administrator account is {status_val}."
-                )
+            from api.platform_admin import platform_admin_manager
+            sb_client = platform_admin_manager.supabase
+            if sb_client is not None:
+                res = sb_client.table("platform_admins").select("id, account_status").eq("user_id", str(user.user_id)).execute()
+                if not res or not res.data or len(res.data) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: No authoritative platform administrator record found."
+                    )
+                status_val = (res.data[0].get("account_status") or "").strip().lower()
+                if status_val != "active":
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail=f"Access denied: Platform administrator account is {status_val}."
+                    )
         except HTTPException:
             raise
         except Exception as e:

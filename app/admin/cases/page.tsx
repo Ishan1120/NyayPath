@@ -467,3 +467,4 @@ export default function AdminCasesPage() {
     </AdminLayout>
   );
 }
+

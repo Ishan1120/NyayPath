@@ -648,3 +648,4 @@ export default function AdminInstitutionsPage() {
     </AdminLayout>
   );
 }
+

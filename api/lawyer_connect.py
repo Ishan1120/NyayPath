@@ -416,6 +416,10 @@ class LawyerConnectManager:
                     cdata.get("user_id") or
                     c_rec.get("user_id")
                 )
+                if not owner_uid:
+                    camp_res = self.supabase.table("campus_cases").select("student_user_id").eq("case_id", clean_case_id).execute()
+                    if camp_res.data:
+                        owner_uid = camp_res.data[0].get("student_user_id")
                 if str(owner_uid).lower() != str(citizen_user.user_id).lower():
                     raise HTTPException(
                         status_code=status.HTTP_403_FORBIDDEN,
@@ -674,6 +678,10 @@ class LawyerConnectManager:
             cdata.get("user_id") or
             c_rec.get("user_id")
         )
+        if not owner_id:
+            camp_res = self.supabase.table("campus_cases").select("student_user_id").eq("case_id", clean_case_id).execute()
+            if camp_res.data:
+                owner_id = camp_res.data[0].get("student_user_id")
         if str(owner_id).lower() != str(citizen_user.user_id).lower():
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
