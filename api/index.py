@@ -6,7 +6,7 @@ import json
 import email
 import logging
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, HTTPException, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form, status
 from starlette.requests import Request
 from starlette.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,6 +54,7 @@ try:
         CaseCommitteeRevokeRequest
     )
     from .document_access import DocumentAccessManager
+    from .citizen_workspace import citizen_workspace_manager
     from .rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from .auth import (
         AuthUser,
@@ -61,6 +62,7 @@ try:
         LoginRequest,
         authenticate_officer,
         authenticate_institutional_user,
+        authenticate_citizen,
         create_access_token,
         get_current_user_optional,
         get_current_authenticated_user
@@ -96,6 +98,7 @@ except ImportError:
         CaseCommitteeRevokeRequest
     )
     from document_access import DocumentAccessManager
+    from citizen_workspace import citizen_workspace_manager
     from rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from auth import (
         AuthUser,
@@ -103,6 +106,7 @@ except ImportError:
         LoginRequest,
         authenticate_officer,
         authenticate_institutional_user,
+        authenticate_citizen,
         create_access_token,
         get_current_user_optional,
         get_current_authenticated_user
@@ -1011,8 +1015,8 @@ def get_campus_case(
                 record_rate_limit_failure(request, action="case", target_id=norm_case_id, max_attempts=5, window_seconds=900, cooldown_seconds=900)
             raise e
 
-    # 3. Authenticated student matching student_user_id
-    if user and user.role == UserRole.STUDENT:
+    # 3. Authenticated student or citizen matching student_user_id
+    if user and user.role in [UserRole.STUDENT, UserRole.CITIZEN]:
         case = campus_proctor_manager.get_case_for_student(case_id, student_user=user)
         return {"case": case}
 
@@ -1184,3 +1188,99 @@ def synthesize_draft_endpoint(payload: SynthesizeDraftRequest):
     })
     
     return {"case_id": case_id, **res}
+
+
+# =====================================================================
+# Phase 2.1: Citizen Dashboard & My Cases Workspace Endpoints (Task 7)
+# =====================================================================
+
+@app.post("/api/citizen/auth/login")
+def citizen_login(payload: LoginRequest, request: Request):
+    """
+    Authenticates a citizen or student user and returns a signed JWT access token.
+    Enforces brute-force rate-limiting.
+    """
+    email_key = (payload.email or "").strip().lower()
+    if not email_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required email address."
+        )
+
+    enforce_rate_limit(request, action="citizen_login", target_id=email_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+
+    user = authenticate_citizen(payload)
+    if not user:
+        record_rate_limit_failure(request, action="citizen_login", target_id=email_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid citizen/student credentials."
+        )
+
+    reset_rate_limit(request, action="citizen_login", target_id=email_key)
+    token = create_access_token(user, expires_delta=timedelta(hours=24))
+
+    return {
+        "status": "success",
+        "token": token,
+        "user": {
+            "user_id": user.user_id,
+            "name": user.name,
+            "email": user.email,
+            "role": user.role.value,
+            "institution_id": user.institution_id,
+            "account_status": user.account_status.value
+        }
+    }
+
+
+@app.get("/api/citizen/dashboard-stats")
+def get_citizen_dashboard_stats(request: Request):
+    """
+    Protected endpoint: Returns live legal case statistics for the authenticated citizen.
+    Strictly derives identity from verified JWT Bearer token (auth.uid()).
+    Fails closed if unauthenticated (401) or on database failure (503).
+    """
+    user = get_current_authenticated_user(request)
+    return citizen_workspace_manager.get_dashboard_stats(user)
+
+
+@app.get("/api/citizen/cases")
+def list_citizen_cases(
+    request: Request,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    sort_by: str = "created_at",
+    sort_order: str = "desc",
+    page: int = 1,
+    limit: int = 10
+):
+    """
+    Protected endpoint: Returns paginated list of cases owned by the authenticated citizen.
+    Internal officer notes and tracking key hashes are strictly omitted.
+    Strictly derives identity from verified JWT Bearer token (auth.uid()).
+    """
+    user = get_current_authenticated_user(request)
+    return citizen_workspace_manager.list_citizen_cases(
+        user=user,
+        status_filter=status,
+        category_filter=category,
+        search=search,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        page=page,
+        limit=limit
+    )
+
+
+@app.get("/api/citizen/cases/{case_id}")
+def get_citizen_case_details(case_id: str, request: Request):
+    """
+    Protected endpoint: Returns full case details, activity timeline, and supporting documents.
+    Strictly verifies ownership: rejects non-owners with 403 Forbidden.
+    Internal proctorial notes are strictly hidden from citizens.
+    """
+    user = get_current_authenticated_user(request)
+    return citizen_workspace_manager.get_case_details(case_id, user)
+

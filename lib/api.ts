@@ -5,10 +5,13 @@ const api = axios.create({
   timeout: 60000,
 });
 
-// Automatic authorization header interceptor for authenticated Proctor/Committee sessions
+// Automatic authorization header interceptor for authenticated Citizen/Proctor/Committee sessions
 api.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
-    const token = localStorage.getItem('nyaypath_proctor_token');
+    const token = 
+      localStorage.getItem('nyaypath_citizen_token') ||
+      localStorage.getItem('nyaypath_token') ||
+      localStorage.getItem('nyaypath_proctor_token');
     if (token && !config.headers.Authorization) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -134,6 +137,48 @@ export const getProctorNotice = (case_id: string, verification_key?: string) => 
   const url = verification_key
     ? `/api/campus-proctor/notice/${case_id}?verification_key=${encodeURIComponent(verification_key)}`
     : `/api/campus-proctor/notice/${case_id}`;
+  return api.get(url).then(r => r.data)
+}
+
+// =====================================================================
+// Citizen Dashboard & My Cases Workspace API (Phase 2.1)
+// =====================================================================
+
+export const loginCitizen = (payload: { email: string; password?: string }) =>
+  api.post('/api/citizen/auth/login', payload).then(r => r.data)
+
+export const getCitizenDashboardStats = () =>
+  api.get('/api/citizen/dashboard-stats').then(r => r.data)
+
+export const getCitizenCases = (params?: {
+  status?: string;
+  category?: string;
+  search?: string;
+  sort_by?: string;
+  sort_order?: string;
+  page?: number;
+  limit?: number;
+}) => {
+  const query = new URLSearchParams();
+  if (params?.status && params.status !== 'ALL') query.set('status', params.status);
+  if (params?.category && params.category !== 'ALL') query.set('category', params.category);
+  if (params?.search) query.set('search', params.search);
+  if (params?.sort_by) query.set('sort_by', params.sort_by);
+  if (params?.sort_order) query.set('sort_order', params.sort_order);
+  if (params?.page) query.set('page', String(params.page));
+  if (params?.limit) query.set('limit', String(params.limit));
+
+  const qs = query.toString();
+  return api.get(`/api/citizen/cases${qs ? `?${qs}` : ''}`).then(r => r.data);
+}
+
+export const getCitizenCaseDetails = (case_id: string) =>
+  api.get(`/api/citizen/cases/${encodeURIComponent(case_id)}`).then(r => r.data)
+
+export const getCaseDocumentUrl = (case_id: string, document_id: string, verification_key?: string) => {
+  const url = verification_key
+    ? `/api/campus-proctor/document-url?case_id=${encodeURIComponent(case_id)}&document_id=${encodeURIComponent(document_id)}&verification_key=${encodeURIComponent(verification_key)}`
+    : `/api/campus-proctor/document-url?case_id=${encodeURIComponent(case_id)}&document_id=${encodeURIComponent(document_id)}`;
   return api.get(url).then(r => r.data)
 }
 

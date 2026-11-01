@@ -227,6 +227,7 @@ def compute_hmac_sha256(key_bytes: bytes, message_bytes: bytes) -> str:
 
 class UserRole(str, Enum):
     STUDENT = "student"
+    CITIZEN = "citizen"
     PROCTOR = "proctor"
     CHIEF_PROCTOR = "chief_proctor"
     COMMITTEE_MEMBER = "committee_member"
@@ -748,6 +749,38 @@ LOCAL_OFFICER_REGISTRY: Dict[str, Dict[str, Any]] = {
         "role": UserRole.PLATFORM_ADMIN,
         "institution_id": "*",
         "account_status": AccountStatus.ACTIVE
+    },
+    "student@nit.edu": {
+        "user_id": "00000000-0000-4000-8000-000000000010",
+        "name": "Aarav Sharma (Student)",
+        "password_hash": _SAMPLE_HASH,
+        "role": UserRole.STUDENT,
+        "institution_id": "INST_DEFAULT",
+        "account_status": AccountStatus.ACTIVE
+    },
+    "citizen@nyaypath.in": {
+        "user_id": "00000000-0000-4000-8000-000000000020",
+        "name": "Priya Patel (Citizen)",
+        "password_hash": _SAMPLE_HASH,
+        "role": UserRole.CITIZEN,
+        "institution_id": "INST_DEFAULT",
+        "account_status": AccountStatus.ACTIVE
+    },
+    "alice@collegex.edu": {
+        "user_id": "aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa",
+        "name": "Alice Student",
+        "password_hash": _SAMPLE_HASH,
+        "role": UserRole.STUDENT,
+        "institution_id": "INST_COLLEGE_X",
+        "account_status": AccountStatus.ACTIVE
+    },
+    "bob@collegex.edu": {
+        "user_id": "bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb",
+        "name": "Bob Student",
+        "password_hash": _SAMPLE_HASH,
+        "role": UserRole.STUDENT,
+        "institution_id": "INST_COLLEGE_X",
+        "account_status": AccountStatus.ACTIVE
     }
 }
 
@@ -826,6 +859,70 @@ def authenticate_officer(payload: LoginRequest) -> Optional[AuthUser]:
 def authenticate_institutional_user(payload: LoginRequest) -> Optional[AuthUser]:
     """Compatibility alias for authenticate_officer."""
     return authenticate_officer(payload)
+
+def authenticate_citizen(payload: LoginRequest) -> Optional[AuthUser]:
+    """
+    Authenticates a citizen or student user.
+    - If Supabase is configured: Uses Supabase Auth (`sign_in_with_password`).
+    - If in local dev/test: Uses salted PBKDF2 password verification against the user registry.
+    - Strictly checks account_status (rejects suspended or revoked accounts).
+    """
+    clean_email = (payload.email or "").strip().lower()
+    clean_pass = payload.password or ""
+
+    if not clean_email or not clean_pass:
+        return None
+
+    # 1. Supabase Auth Integration
+    url = os.environ.get("SUPABASE_URL")
+    publishable_key = os.environ.get("SUPABASE_PUBLISHABLE_KEY")
+    if url and publishable_key:
+        try:
+            from supabase import create_client
+            sb_client = create_client(url, publishable_key)
+            res = sb_client.auth.sign_in_with_password({"email": clean_email, "password": clean_pass})
+            if res.user:
+                app_meta = res.user.app_metadata or {}
+                status_str = app_meta.get("account_status", "active")
+                if status_str in ["suspended", "revoked"]:
+                    logger.warning(f"Blocked citizen login for {status_str} account: {clean_email}")
+                    return None
+
+                role_str = app_meta.get("role", "citizen")
+                try:
+                    role_enum = UserRole(role_str)
+                except ValueError:
+                    role_enum = UserRole.CITIZEN
+
+                return AuthUser(
+                    user_id=str(res.user.id),
+                    role=role_enum,
+                    institution_id=app_meta.get("institution_id", "INST_DEFAULT"),
+                    name=res.user.user_metadata.get("full_name") or "Verified Citizen",
+                    email=res.user.email,
+                    account_status=AccountStatus(status_str)
+                )
+        except Exception as e:
+            logger.info(f"Supabase Auth citizen login attempt: {e}")
+
+    # 2. Local/Dev Registry
+    entry = LOCAL_OFFICER_REGISTRY.get(clean_email)
+    if entry:
+        if not verify_officer_password(clean_pass, entry["password_hash"]):
+            return None
+        if entry["account_status"] != AccountStatus.ACTIVE:
+            logger.warning(f"Citizen login rejected: Account is {entry['account_status'].value} for {clean_email}")
+            return None
+        return AuthUser(
+            user_id=entry["user_id"],
+            role=entry["role"],
+            institution_id=entry["institution_id"],
+            name=entry["name"],
+            email=clean_email,
+            account_status=entry["account_status"]
+        )
+
+    return None
 
 # =====================================================================
 # FastAPI Authorization Dependencies
