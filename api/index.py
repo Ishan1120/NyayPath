@@ -94,7 +94,17 @@ try:
         authenticate_citizen,
         create_access_token,
         get_current_user_optional,
-        get_current_authenticated_user
+        get_current_authenticated_user,
+        require_platform_admin
+    )
+    from .platform_admin import (
+        platform_admin_manager,
+        UserStatusUpdateRequest,
+        InstitutionCreateRequest,
+        InstitutionUpdateRequest,
+        InstitutionStatusUpdateRequest,
+        LawyerVerificationProcessRequest,
+        ExceptionalAccessRequest
     )
 except ImportError:
     from precedent_pdf_generator import generate_precedent_case_brief_pdf
@@ -167,7 +177,17 @@ except ImportError:
         authenticate_citizen,
         create_access_token,
         get_current_user_optional,
-        get_current_authenticated_user
+        get_current_authenticated_user,
+        require_platform_admin
+    )
+    from platform_admin import (
+        platform_admin_manager,
+        UserStatusUpdateRequest,
+        InstitutionCreateRequest,
+        InstitutionUpdateRequest,
+        InstitutionStatusUpdateRequest,
+        LawyerVerificationProcessRequest,
+        ExceptionalAccessRequest
     )
 
 logger = logging.getLogger(__name__)
@@ -2051,6 +2071,243 @@ def update_lawyer_availability_endpoint(payload: LawyerAvailabilityPayload, requ
     """
     user = get_current_authenticated_user(request)
     return communication_manager.update_lawyer_availability(user, payload)
+
+
+# =============================================================================
+# Phase 7: Platform Administration & Global Oversight Endpoints
+# =============================================================================
+
+@app.get("/api/admin/overview")
+def get_admin_overview_endpoint(request: Request):
+    """
+    Returns platform-wide database-derived statistics.
+    Requires authoritative Platform Administrator authorization.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.get_global_statistics(admin_user)
+
+
+@app.get("/api/admin/activity")
+def get_admin_activity_endpoint(request: Request, limit: int = 15):
+    """
+    Returns recent administrative and system events.
+    """
+    admin_user = require_platform_admin(request)
+    activities = platform_admin_manager.get_activity_overview(admin_user, limit=limit)
+    return {"activities": activities}
+
+
+@app.get("/api/admin/users")
+def list_admin_users_endpoint(
+    request: Request,
+    search: Optional[str] = None,
+    role: Optional[str] = None,
+    status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20
+):
+    """
+    Lists platform users across categories with filtering and pagination.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.list_users(
+        admin_user=admin_user,
+        search=search,
+        role=role,
+        account_status=status,
+        page=page,
+        page_size=page_size
+    )
+
+
+@app.get("/api/admin/users/{user_id}")
+def get_admin_user_profile_endpoint(user_id: str, request: Request):
+    """
+    Returns user profile details without exposing credentials or JWT tokens.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.get_user_profile(admin_user, user_id)
+
+
+@app.patch("/api/admin/users/{user_id}/status")
+def update_admin_user_status_endpoint(user_id: str, payload: UserStatusUpdateRequest, request: Request):
+    """
+    Suspends, reinstates, or revokes a platform user.
+    Prevents self-modification and records an immutable audit log.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.update_user_account_status(admin_user, user_id, payload)
+
+
+@app.get("/api/admin/institutions")
+def list_admin_institutions_endpoint(
+    request: Request,
+    search: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    page: int = 1,
+    page_size: int = 20
+):
+    """
+    Lists registered institutions with member and grievance counts.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.list_institutions(
+        admin_user=admin_user,
+        search=search,
+        is_active=is_active,
+        page=page,
+        page_size=page_size
+    )
+
+
+@app.get("/api/admin/institutions/{institution_id}")
+def get_admin_institution_details_endpoint(institution_id: str, request: Request):
+    """
+    Returns full institution metadata, roster, and grievance stats.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.get_institution_details(admin_user, institution_id)
+
+
+@app.post("/api/admin/institutions")
+def register_admin_institution_endpoint(payload: InstitutionCreateRequest, request: Request):
+    """
+    Registers a new institution with unique code and metadata.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.register_institution(admin_user, payload)
+
+
+@app.patch("/api/admin/institutions/{institution_id}")
+def update_admin_institution_metadata_endpoint(
+    institution_id: str,
+    payload: InstitutionUpdateRequest,
+    request: Request
+):
+    """
+    Updates permitted institution metadata.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.update_institution_metadata(admin_user, institution_id, payload)
+
+
+@app.patch("/api/admin/institutions/{institution_id}/status")
+def toggle_admin_institution_status_endpoint(
+    institution_id: str,
+    payload: InstitutionStatusUpdateRequest,
+    request: Request
+):
+    """
+    Activates or deactivates an institution.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.toggle_institution_status(admin_user, institution_id, payload)
+
+
+@app.get("/api/admin/lawyers/queue")
+def list_admin_lawyer_queue_endpoint(
+    request: Request,
+    status: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20
+):
+    """
+    Lists lawyer verification queue with bar enrollment details.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.list_lawyer_verification_queue(
+        admin_user=admin_user,
+        status_filter=status,
+        page=page,
+        page_size=page_size
+    )
+
+
+@app.post("/api/admin/lawyers/{lawyer_id}/decision")
+def process_admin_lawyer_decision_endpoint(
+    lawyer_id: str,
+    payload: LawyerVerificationProcessRequest,
+    request: Request
+):
+    """
+    Executes verification decision (VERIFIED, REJECTED, SUSPENDED) via admin_verify_lawyer RPC.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.process_lawyer_verification(admin_user, lawyer_id, payload)
+
+
+@app.get("/api/admin/cases")
+def list_admin_global_cases_endpoint(
+    request: Request,
+    case_type: Optional[str] = None,
+    status: Optional[str] = None,
+    institution: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 20
+):
+    """
+    Platform-wide case oversight with privacy masking of student PII and proctor deliberations.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.list_global_cases(
+        admin_user=admin_user,
+        case_type=case_type,
+        case_status=status,
+        institution_code=institution,
+        search=search,
+        page=page,
+        page_size=page_size
+    )
+
+
+@app.post("/api/admin/cases/{case_id}/confidential-access")
+def get_admin_confidential_case_details_endpoint(
+    case_id: str,
+    payload: ExceptionalAccessRequest,
+    request: Request
+):
+    """
+    Audited exceptional access to confidential case details.
+    Requires an explicit justification (minimum 10 characters).
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.get_case_confidential_details(admin_user, case_id, payload)
+
+
+@app.get("/api/admin/audit-logs")
+def list_admin_audit_logs_endpoint(
+    request: Request,
+    actor_id: Optional[str] = None,
+    action_type: Optional[str] = None,
+    entity_type: Optional[str] = None,
+    institution: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50
+):
+    """
+    Retrieves immutable platform audit logs.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.list_platform_audit_logs(
+        admin_user=admin_user,
+        actor_id=actor_id,
+        action_type=action_type,
+        target_entity_type=entity_type,
+        institution_code=institution,
+        page=page,
+        page_size=page_size
+    )
+
+
+@app.get("/api/admin/system/health")
+def get_admin_system_health_endpoint(request: Request):
+    """
+    Returns operational health status of core platform dependencies.
+    """
+    admin_user = require_platform_admin(request)
+    return platform_admin_manager.get_system_health(admin_user)
+
 
 
 

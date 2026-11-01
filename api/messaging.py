@@ -201,7 +201,7 @@ class CommunicationManager:
 
         # Scope check if required_scope specified
         scope = (access_row.get("shared_scope") or "").strip().upper()
-        if required_scope == "CASE_AND_DOCS" and scope != "CASE_AND_DOCS":
+        if required_scope == "CASE_AND_DOCS" and scope not in ["CASE_AND_DOCS", "FULL"]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied: Case sharing scope does not permit document attachment access."

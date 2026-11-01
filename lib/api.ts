@@ -5,10 +5,11 @@ const api = axios.create({
   timeout: 60000,
 });
 
-// Automatic authorization header interceptor for authenticated Citizen/Proctor/Committee sessions
+// Automatic authorization header interceptor for authenticated Citizen/Proctor/Committee/Admin sessions
 api.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
     const token = 
+      localStorage.getItem('nyaypath_platform_admin_token') ||
       localStorage.getItem('nyaypath_citizen_token') ||
       localStorage.getItem('nyaypath_lawyer_token') ||
       localStorage.getItem('nyaypath_token') ||
@@ -735,6 +736,210 @@ export const getLawyerAvailability = (lawyerId: string) =>
 
 export const updateLawyerAvailability = (payload: LawyerAvailability) =>
   api.put('/api/lawyer/availability', payload).then(r => r.data);
+
+// =============================================================================
+// Phase 7: Platform Administration & Global Oversight
+// =============================================================================
+
+export interface PlatformOverviewStats {
+  total_users: number;
+  citizens: number;
+  students: number;
+  lawyers: number;
+  verified_lawyers: number;
+  pending_lawyers: number;
+  institutions: number;
+  active_institutions: number;
+  institutional_memberships: number;
+  total_cases: number;
+  active_cases: number;
+  resolved_cases: number;
+  pending_consultations: number;
+  scheduled_meetings: number;
+  total_notifications: number;
+  timestamp: string;
+}
+
+export interface PlatformUserItem {
+  id: string;
+  email: string;
+  full_name: string;
+  phone?: string;
+  role: string;
+  account_status: string;
+  is_verified: boolean;
+  institution_code?: string;
+  created_at: string;
+  updated_at: string;
+  lawyer_profile?: any;
+}
+
+export interface PlatformInstitutionItem {
+  id: string;
+  code: string;
+  name: string;
+  city: string;
+  state: string;
+  type: string;
+  is_active: boolean;
+  member_count: number;
+  grievance_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlatformAuditLogItem {
+  id: string;
+  actor_user_id: string;
+  actor_email: string;
+  actor_role: string;
+  action_type: string;
+  target_entity_type: string;
+  target_entity_id: string;
+  institution_code?: string;
+  reason?: string;
+  details: Record<string, any>;
+  created_at: string;
+}
+
+export const getPlatformOverview = (): Promise<PlatformOverviewStats> =>
+  api.get('/api/admin/overview').then(r => r.data);
+
+export const getPlatformActivity = (limit: number = 15): Promise<{ activities: PlatformAuditLogItem[] }> =>
+  api.get(`/api/admin/activity?limit=${limit}`).then(r => r.data);
+
+export const getPlatformUsers = (params?: {
+  search?: string;
+  role?: string;
+  status?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ users: PlatformUserItem[]; total: number; page: number; page_size: number }> => {
+  const q = new URLSearchParams();
+  if (params?.search) q.set('search', params.search);
+  if (params?.role) q.set('role', params.role);
+  if (params?.status) q.set('status', params.status);
+  if (params?.page) q.set('page', String(params.page));
+  if (params?.page_size) q.set('page_size', String(params.page_size));
+  const qs = q.toString() ? `?${q.toString()}` : '';
+  return api.get(`/api/admin/users${qs}`).then(r => r.data);
+};
+
+export const getPlatformUserProfile = (userId: string): Promise<any> =>
+  api.get(`/api/admin/users/${encodeURIComponent(userId)}`).then(r => r.data);
+
+export const updatePlatformUserStatus = (
+  userId: string,
+  payload: { new_status: string; reason: string }
+): Promise<any> =>
+  api.patch(`/api/admin/users/${encodeURIComponent(userId)}/status`, payload).then(r => r.data);
+
+export const getPlatformInstitutions = (params?: {
+  search?: string;
+  is_active?: boolean;
+  page?: number;
+  page_size?: number;
+}): Promise<{ institutions: PlatformInstitutionItem[]; total: number; page: number; page_size: number }> => {
+  const q = new URLSearchParams();
+  if (params?.search) q.set('search', params.search);
+  if (params?.is_active !== undefined) q.set('is_active', String(params.is_active));
+  if (params?.page) q.set('page', String(params.page));
+  if (params?.page_size) q.set('page_size', String(params.page_size));
+  const qs = q.toString() ? `?${q.toString()}` : '';
+  return api.get(`/api/admin/institutions${qs}`).then(r => r.data);
+};
+
+export const getPlatformInstitutionDetails = (institutionId: string): Promise<any> =>
+  api.get(`/api/admin/institutions/${encodeURIComponent(institutionId)}`).then(r => r.data);
+
+export const registerPlatformInstitution = (payload: {
+  code: string;
+  name: string;
+  city: string;
+  state: string;
+  type?: string;
+  is_active?: boolean;
+}): Promise<any> =>
+  api.post('/api/admin/institutions', payload).then(r => r.data);
+
+export const updatePlatformInstitutionMetadata = (
+  institutionId: string,
+  payload: { name?: string; city?: string; state?: string; type?: string }
+): Promise<any> =>
+  api.patch(`/api/admin/institutions/${encodeURIComponent(institutionId)}`, payload).then(r => r.data);
+
+export const togglePlatformInstitutionStatus = (
+  institutionId: string,
+  payload: { is_active: boolean; reason: string }
+): Promise<any> =>
+  api.patch(`/api/admin/institutions/${encodeURIComponent(institutionId)}/status`, payload).then(r => r.data);
+
+export const getPlatformLawyerQueue = (params?: {
+  status?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ lawyers: any[]; total: number; page: number; page_size: number }> => {
+  const q = new URLSearchParams();
+  if (params?.status) q.set('status', params.status);
+  if (params?.page) q.set('page', String(params.page));
+  if (params?.page_size) q.set('page_size', String(params.page_size));
+  const qs = q.toString() ? `?${q.toString()}` : '';
+  return api.get(`/api/admin/lawyers/queue${qs}`).then(r => r.data);
+};
+
+export const processPlatformLawyerDecision = (
+  lawyerId: string,
+  payload: { decision: string; notes?: string }
+): Promise<any> =>
+  api.post(`/api/admin/lawyers/${encodeURIComponent(lawyerId)}/decision`, payload).then(r => r.data);
+
+export const getPlatformCases = (params?: {
+  case_type?: string;
+  status?: string;
+  institution?: string;
+  search?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ cases: any[]; total: number; page: number; page_size: number }> => {
+  const q = new URLSearchParams();
+  if (params?.case_type) q.set('case_type', params.case_type);
+  if (params?.status) q.set('status', params.status);
+  if (params?.institution) q.set('institution', params.institution);
+  if (params?.search) q.set('search', params.search);
+  if (params?.page) q.set('page', String(params.page));
+  if (params?.page_size) q.set('page_size', String(params.page_size));
+  const qs = q.toString() ? `?${q.toString()}` : '';
+  return api.get(`/api/admin/cases${qs}`).then(r => r.data);
+};
+
+export const getPlatformCaseConfidentialAccess = (
+  caseId: string,
+  payload: { reason: string }
+): Promise<any> =>
+  api.post(`/api/admin/cases/${encodeURIComponent(caseId)}/confidential-access`, payload).then(r => r.data);
+
+export const getPlatformAuditLogs = (params?: {
+  actor_id?: string;
+  action_type?: string;
+  entity_type?: string;
+  institution?: string;
+  page?: number;
+  page_size?: number;
+}): Promise<{ audit_logs: PlatformAuditLogItem[]; total: number; page: number; page_size: number }> => {
+  const q = new URLSearchParams();
+  if (params?.actor_id) q.set('actor_id', params.actor_id);
+  if (params?.action_type) q.set('action_type', params.action_type);
+  if (params?.entity_type) q.set('entity_type', params.entity_type);
+  if (params?.institution) q.set('institution', params.institution);
+  if (params?.page) q.set('page', String(params.page));
+  if (params?.page_size) q.set('page_size', String(params.page_size));
+  const qs = q.toString() ? `?${q.toString()}` : '';
+  return api.get(`/api/admin/audit-logs${qs}`).then(r => r.data);
+};
+
+export const getPlatformSystemHealth = (): Promise<any> =>
+  api.get('/api/admin/system/health').then(r => r.data);
+
 
 
 

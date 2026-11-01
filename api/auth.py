@@ -797,6 +797,14 @@ LOCAL_OFFICER_REGISTRY: Dict[str, Dict[str, Any]] = {
         "institution_id": "*",
         "account_status": AccountStatus.ACTIVE
     },
+    "platform@nyaypath.gov": {
+        "user_id": "99999999-1111-2222-3333-999999999999",
+        "name": "Platform Administrator",
+        "password_hash": _SAMPLE_HASH,
+        "role": UserRole.PLATFORM_ADMIN,
+        "institution_id": "*",
+        "account_status": AccountStatus.ACTIVE
+    },
     "student@nit.edu": {
         "user_id": "00000000-0000-4000-8000-000000000010",
         "name": "Aarav Sharma (Student)",
@@ -1020,3 +1028,47 @@ def verify_institutional_boundary(user: AuthUser, case_institution_id: str):
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access denied: You are authorized for '{user.institution_id}' but this case belongs to '{case_institution_id}'."
         )
+
+def require_platform_admin(request: Request) -> AuthUser:
+    """
+    Enforces authoritative Platform Administrator verification.
+    1. Checks authenticated user role is UserRole.PLATFORM_ADMIN.
+    2. Validates live account status in public.platform_admins if Supabase is connected.
+    3. Fails closed with 403 Forbidden on missing or non-active admin records.
+    """
+    user = get_current_authenticated_user(request)
+    if user.role != UserRole.PLATFORM_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Access denied: Role '{user.role.value}' lacks platform administrator privileges."
+        )
+
+    # Database-backed live verification if database is connected
+    sb_url = os.environ.get("SUPABASE_URL")
+    sb_key = os.environ.get("SUPABASE_SECRET_KEY")
+    if sb_url and sb_key and os.environ.get("SUPABASE_OFFLINE_TEST") != "1":
+        try:
+            from supabase import create_client
+            sb_client = create_client(sb_url, sb_key)
+            res = sb_client.table("platform_admins").select("id, account_status").eq("user_id", str(user.user_id)).execute()
+            if not res or not res.data or len(res.data) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied: No authoritative platform administrator record found."
+                )
+            status_val = (res.data[0].get("account_status") or "").strip().lower()
+            if status_val != "active":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access denied: Platform administrator account is {status_val}."
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error checking platform_admins table: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Unable to verify authoritative platform administrator status."
+            )
+
+    return user

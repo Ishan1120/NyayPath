@@ -24,7 +24,8 @@ import {
   AlertCircle,
   Building,
   MessageSquare,
-  Calendar
+  Calendar,
+  ShieldCheck
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -40,6 +41,7 @@ export default function Navbar() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isLawyer, setIsLawyer] = useState(false);
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
   const [unreadCount, setUnreadCount] = useState<number>(0);
   const [notifications, setNotifications] = useState<CaseNotification[]>([]);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -49,6 +51,7 @@ export default function Navbar() {
   useEffect(() => {
     if (typeof window !== "undefined") {
       const token =
+        localStorage.getItem("nyaypath_platform_admin_token") ||
         localStorage.getItem("nyaypath_citizen_token") ||
         localStorage.getItem("nyaypath_lawyer_token") ||
         localStorage.getItem("nyaypath_token") ||
@@ -58,16 +61,19 @@ export default function Navbar() {
 
       const userRole = localStorage.getItem("nyaypath_user_role");
       let isL = userRole === "lawyer" || !!localStorage.getItem("nyaypath_lawyer_token");
-      if (!isL) {
+      let isPA = userRole === "platform_admin" || !!localStorage.getItem("nyaypath_platform_admin_token");
+      if (!isL || !isPA) {
         try {
           const userStr = localStorage.getItem("nyaypath_user");
           if (userStr) {
             const u = JSON.parse(userStr);
             if (u.role === "lawyer") isL = true;
+            if (u.role === "platform_admin") isPA = true;
           }
         } catch {}
       }
       setIsLawyer(isL);
+      setIsPlatformAdmin(isPA);
 
       if (logged) {
         fetchUnreadCount();
@@ -209,6 +215,9 @@ export default function Navbar() {
     ] : []),
     { name: "College Proctor", href: "/campus-proctor", icon: GraduationCap },
     { name: "Institution", href: "/institution/dashboard", icon: Building },
+    ...(isPlatformAdmin ? [
+      { name: "Platform Admin", href: "/admin/dashboard", icon: ShieldCheck }
+    ] : []),
     { name: "Case Search", href: "/case-search", icon: BookOpen },
     { name: "Track SLA", href: "/track", icon: Clock },
   ];

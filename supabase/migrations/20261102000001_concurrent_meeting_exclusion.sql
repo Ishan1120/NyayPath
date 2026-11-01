@@ -24,3 +24,4 @@ BEGIN
         WHERE (status = 'CONFIRMED');
     END IF;
 END $$;
+
