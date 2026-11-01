@@ -20,9 +20,13 @@ import {
   HelpCircle,
   FileSearch,
   Lock,
-  Eye
+  Eye,
+  MessageSquare,
+  Zap,
+  XCircle,
+  Send
 } from 'lucide-react';
-import { getCitizenCaseDetails, getCaseDocumentUrl } from '@/lib/api';
+import { getCitizenCaseDetails, getCaseDocumentUrl, executeCaseLifecycleAction } from '@/lib/api';
 
 export default function CaseDetailsPage() {
   const params = useParams();
@@ -38,6 +42,13 @@ export default function CaseDetailsPage() {
   // Document download state
   const [docLoadingId, setDocLoadingId] = useState<string | null>(null);
   const [docNotice, setDocNotice] = useState<{ docId: string; message: string; ttl: number } | null>(null);
+
+  // Lifecycle action state
+  const [activeActionModal, setActiveActionModal] = useState<'WITHDRAW' | 'ADD_REMARK' | 'REQUEST_EXPEDITE' | null>(null);
+  const [actionInput, setActionInput] = useState<string>('');
+  const [actionLoading, setActionLoading] = useState<boolean>(false);
+  const [actionSuccessMessage, setActionSuccessMessage] = useState<string | null>(null);
+  const [actionErrorMessage, setActionErrorMessage] = useState<string | null>(null);
 
   const fetchDetails = async () => {
     if (!caseId) return;
@@ -87,6 +98,38 @@ export default function CaseDetailsPage() {
       alert(err?.response?.data?.detail || 'Document access denied or unavailable.');
     } finally {
       setDocLoadingId(null);
+    }
+  };
+
+  const handleLifecycleAction = async () => {
+    if (!activeActionModal || !caseId) return;
+    setActionLoading(true);
+    setActionErrorMessage(null);
+    setActionSuccessMessage(null);
+    try {
+      const payload: any = { action: activeActionModal };
+      if (activeActionModal === 'WITHDRAW') {
+        payload.reason = actionInput || 'Case withdrawn by applicant.';
+      } else if (activeActionModal === 'ADD_REMARK') {
+        if (!actionInput.trim()) {
+          setActionErrorMessage('Remark text is required.');
+          setActionLoading(false);
+          return;
+        }
+        payload.remarks = actionInput.trim();
+      } else if (activeActionModal === 'REQUEST_EXPEDITE') {
+        payload.reason = actionInput.trim() || 'Applicant requested urgent expedite review.';
+      }
+
+      const res = await executeCaseLifecycleAction(caseId, payload);
+      setActionSuccessMessage(res.message || 'Action executed successfully.');
+      setActiveActionModal(null);
+      setActionInput('');
+      await fetchDetails();
+    } catch (err: any) {
+      setActionErrorMessage(err?.response?.data?.detail || 'Failed to execute lifecycle action.');
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -264,6 +307,175 @@ export default function CaseDetailsPage() {
               </div>
             </div>
 
+            {/* Success / Error Alerts for Lifecycle Actions */}
+            {actionSuccessMessage && (
+              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-bold flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{actionSuccessMessage}</span>
+                </div>
+                <button
+                  onClick={() => setActionSuccessMessage(null)}
+                  className="text-emerald-600 hover:text-emerald-900 text-xs"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {actionErrorMessage && (
+              <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{actionErrorMessage}</span>
+                </div>
+                <button
+                  onClick={() => setActionErrorMessage(null)}
+                  className="text-rose-600 hover:text-rose-900 text-xs"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
+            {/* Applicant Lifecycle Actions Panel (Phase 2.2 Task 3) */}
+            <div className="p-6 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-amber-600" />
+                    <span>Applicant Case Management Actions</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Exercise citizen lifecycle options. Actions are cryptographically recorded in the activity timeline.
+                  </p>
+                </div>
+
+                {!['CLOSED', 'RESOLVED', 'WITHDRAWN'].includes((caseData.status || '').toUpperCase()) ? (
+                  <span className="text-[10px] uppercase font-bold tracking-wider px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 self-start sm:self-auto">
+                    Actions Active
+                  </span>
+                ) : (
+                  <span className="text-[10px] uppercase font-bold tracking-wider px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 border border-slate-200 self-start sm:self-auto">
+                    Case Finalized
+                  </span>
+                )}
+              </div>
+
+              {!['CLOSED', 'RESOLVED', 'WITHDRAWN'].includes((caseData.status || '').toUpperCase()) ? (
+                <div>
+                  {!activeActionModal ? (
+                    <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveActionModal('ADD_REMARK');
+                          setActionInput('');
+                        }}
+                        className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs border border-slate-200 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5 text-slate-600" />
+                        <span>Add Supplementary Remark</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveActionModal('REQUEST_EXPEDITE');
+                          setActionInput('');
+                        }}
+                        className="px-4 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-xs border border-amber-200 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Zap className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Request Expedited Inquiry</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveActionModal('WITHDRAW');
+                          setActionInput('');
+                        }}
+                        className="px-4 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-xs border border-rose-200 transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <XCircle className="w-3.5 h-3.5 text-rose-600" />
+                        <span>Withdraw Grievance</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold text-slate-900 flex items-center gap-2">
+                          {activeActionModal === 'WITHDRAW' && <XCircle className="w-4 h-4 text-rose-600" />}
+                          {activeActionModal === 'ADD_REMARK' && <MessageSquare className="w-4 h-4 text-slate-700" />}
+                          {activeActionModal === 'REQUEST_EXPEDITE' && <Zap className="w-4 h-4 text-amber-600" />}
+                          <span>
+                            {activeActionModal === 'WITHDRAW' && 'Confirm Case Withdrawal'}
+                            {activeActionModal === 'ADD_REMARK' && 'Add Remark to Case Record'}
+                            {activeActionModal === 'REQUEST_EXPEDITE' && 'Submit Expedite Request'}
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setActiveActionModal(null)}
+                          className="text-xs text-slate-400 hover:text-slate-600"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-600 mb-1">
+                          {activeActionModal === 'WITHDRAW' && 'Reason for Withdrawal (e.g. mutually resolved, filed by mistake)'}
+                          {activeActionModal === 'ADD_REMARK' && 'Enter your supplementary note or factual update'}
+                          {activeActionModal === 'REQUEST_EXPEDITE' && 'Justification for urgent handling'}
+                        </label>
+                        <textarea
+                          rows={3}
+                          value={actionInput}
+                          onChange={e => setActionInput(e.target.value)}
+                          placeholder="Enter details..."
+                          className="w-full px-3 py-2 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-court-maroon/20 focus:border-court-maroon"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setActiveActionModal(null)}
+                          disabled={actionLoading}
+                          className="px-3.5 py-1.5 rounded-xl bg-white border border-slate-200 text-slate-600 font-bold text-xs hover:bg-slate-100"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleLifecycleAction}
+                          disabled={actionLoading}
+                          className={`px-4 py-1.5 rounded-xl text-white font-bold text-xs flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer ${
+                            activeActionModal === 'WITHDRAW'
+                              ? 'bg-rose-600 hover:bg-rose-700'
+                              : 'bg-court-maroon hover:bg-rose-900'
+                          }`}
+                        >
+                          {actionLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                          <span>
+                            {activeActionModal === 'WITHDRAW' && 'Confirm Withdrawal'}
+                            {activeActionModal === 'ADD_REMARK' && 'Post Remark'}
+                            {activeActionModal === 'REQUEST_EXPEDITE' && 'Submit Expedite Request'}
+                          </span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500 italic">
+                  This case is closed or resolved. Additional lifecycle actions cannot be submitted.
+                </p>
+              )}
+            </div>
+
             {/* Case Description Card */}
             <div className="p-6 rounded-3xl bg-white border border-slate-200 shadow-sm space-y-3">
               <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
@@ -437,3 +649,4 @@ export default function CaseDetailsPage() {
     </div>
   );
 }
+

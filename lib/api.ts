@@ -182,6 +182,56 @@ export const getCaseDocumentUrl = (case_id: string, document_id: string, verific
   return api.get(url).then(r => r.data)
 }
 
+// =====================================================================
+// Central Case Management & Filing System API (Phase 2.2)
+// =====================================================================
+
+export interface CaseFilingPayload {
+  category: string;
+  sub_category?: string;
+  subject: string;
+  facts: string;
+  remedy_sought?: string;
+  department?: string;
+  incident_date?: string;
+  is_confidential?: boolean;
+  supporting_documents?: Array<{
+    document_id?: string;
+    file_name: string;
+    storage_path: string;
+    file_size_bytes?: number;
+    mime_type?: string;
+  }>;
+  declaration_confirmed: boolean;
+}
+
+export const fileCitizenCase = (payload: CaseFilingPayload) =>
+  api.post('/api/citizen/cases/file', payload).then(r => r.data);
+
+export const uploadCaseDocument = (file: File, caseId?: string) => {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (caseId) formData.append('case_id', caseId);
+  return api.post('/api/citizen/cases/upload-document', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  }).then(r => r.data);
+};
+
+export const executeCaseLifecycleAction = (
+  caseId: string,
+  payload: { action: string; remarks?: string; reason?: string }
+) =>
+  api.post(`/api/citizen/cases/${encodeURIComponent(caseId)}/lifecycle`, payload).then(r => r.data);
+
+export const trackCitizenCase = (caseId: string, verificationKey?: string) => {
+  const url = verificationKey
+    ? `/api/citizen/track/${encodeURIComponent(caseId)}?verification_key=${encodeURIComponent(verificationKey)}`
+    : `/api/citizen/track/${encodeURIComponent(caseId)}`;
+  return api.get(url).then(r => r.data);
+};
+
 export default api
 
 export const triggerBlobDownload = (blobData: Blob, filename: string) => {

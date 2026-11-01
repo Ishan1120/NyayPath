@@ -54,7 +54,12 @@ try:
         CaseCommitteeRevokeRequest
     )
     from .document_access import DocumentAccessManager
-    from .citizen_workspace import citizen_workspace_manager
+    from .citizen_workspace import (
+        citizen_workspace_manager,
+        CaseFilingRequest,
+        CaseLifecycleActionRequest,
+        PublicCaseTrackingRequest
+    )
     from .rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from .auth import (
         AuthUser,
@@ -98,7 +103,12 @@ except ImportError:
         CaseCommitteeRevokeRequest
     )
     from document_access import DocumentAccessManager
-    from citizen_workspace import citizen_workspace_manager
+    from citizen_workspace import (
+        citizen_workspace_manager,
+        CaseFilingRequest,
+        CaseLifecycleActionRequest,
+        PublicCaseTrackingRequest
+    )
     from rate_limiter import enforce_rate_limit, record_rate_limit_failure, reset_rate_limit
     from auth import (
         AuthUser,
@@ -1283,4 +1293,107 @@ def get_citizen_case_details(case_id: str, request: Request):
     """
     user = get_current_authenticated_user(request)
     return citizen_workspace_manager.get_case_details(case_id, user)
+
+
+@app.post("/api/citizen/cases/file")
+def file_citizen_case(payload: CaseFilingRequest, request: Request):
+    """
+    Protected endpoint: Files a new case in the Central Case Management System.
+    Strictly derives identity from verified JWT Bearer token (auth.uid()).
+    Fails closed if unauthenticated (401) or if declaration not accepted (400).
+    """
+    user = get_current_authenticated_user(request)
+    return citizen_workspace_manager.file_case(user=user, payload=payload)
+
+
+@app.post("/api/citizen/cases/upload-document")
+async def upload_case_document(
+    file: UploadFile = File(...),
+    case_id: Optional[str] = Form(None),
+    request: Request = None
+):
+    """
+    Protected endpoint: Uploads and sanitizes a supporting case document.
+    - Strips PDF metadata & XMP streams; strips image EXIF.
+    - Max size 10MB; allowed types: PDF, JPEG, PNG, WebP.
+    - If case_id is provided, verifies ownership before associating.
+    """
+    user = get_current_authenticated_user(request)
+    file_bytes = await file.read()
+    return citizen_workspace_manager.upload_document(
+        user=user,
+        file_bytes=file_bytes,
+        filename=file.filename or "document.pdf",
+        content_type=file.content_type or "application/pdf",
+        case_id=case_id
+    )
+
+
+@app.post("/api/citizen/cases/{case_id}/lifecycle")
+def execute_case_lifecycle_action(
+    case_id: str,
+    payload: CaseLifecycleActionRequest,
+    request: Request
+):
+    """
+    Protected endpoint: Executes citizen lifecycle actions on their case:
+    - WITHDRAW: Permits withdrawal of active cases; sets status to CLOSED.
+    - ADD_REMARK: Adds citizen commentary to case audit log.
+    - REQUEST_EXPEDITE: Registers formal urgent expedite notification for officers.
+    Strictly verifies ownership (403 if unauthorized).
+    """
+    user = get_current_authenticated_user(request)
+    return citizen_workspace_manager.perform_lifecycle_action(
+        case_id=case_id,
+        user=user,
+        payload=payload
+    )
+
+
+@app.post("/api/citizen/track")
+def track_citizen_case_post(payload: PublicCaseTrackingRequest, request: Request):
+    """
+    Public endpoint: Tracks case progress without leaking confidential data or proctor notes.
+    Accepts Case ID + optional 128-bit verification key, or authenticated user session.
+    """
+    case_key = (payload.case_id or "").strip().upper()
+    enforce_rate_limit(request, action="track", target_id=case_key, max_attempts=10, window_seconds=900, cooldown_seconds=900)
+
+    user = get_current_user_optional(request)
+    try:
+        res = citizen_workspace_manager.track_case_public(
+            case_id=payload.case_id,
+            verification_key=payload.verification_key,
+            user=user
+        )
+        reset_rate_limit(request, action="track", target_id=case_key)
+        return res
+    except HTTPException as e:
+        if e.status_code in (401, 403, 404):
+            record_rate_limit_failure(request, action="track", target_id=case_key, max_attempts=10, window_seconds=900, cooldown_seconds=900)
+        raise e
+
+
+@app.get("/api/citizen/track/{case_id}")
+def track_citizen_case_get(case_id: str, request: Request, verification_key: Optional[str] = None):
+    """
+    Public GET endpoint: Quick case progress status lookup.
+    """
+    case_key = (case_id or "").strip().upper()
+    enforce_rate_limit(request, action="track", target_id=case_key, max_attempts=10, window_seconds=900, cooldown_seconds=900)
+
+    user = get_current_user_optional(request)
+    try:
+        res = citizen_workspace_manager.track_case_public(
+            case_id=case_id,
+            verification_key=verification_key,
+            user=user
+        )
+        reset_rate_limit(request, action="track", target_id=case_key)
+        return res
+    except HTTPException as e:
+        if e.status_code in (401, 403, 404):
+            record_rate_limit_failure(request, action="track", target_id=case_key, max_attempts=10, window_seconds=900, cooldown_seconds=900)
+        raise e
+
 

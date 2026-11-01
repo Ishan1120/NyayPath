@@ -184,7 +184,7 @@ export default function MyCasesPage() {
               <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
             </button>
             <Link
-              href="/dashboard?tab=assistant"
+              href="/dashboard/file-case"
               className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-court-maroon to-rose-700 text-white font-bold text-xs shadow-md hover:from-rose-700 hover:to-rose-800 transition-all flex items-center gap-2 cursor-pointer shrink-0"
             >
               <PlusCircle className="w-4 h-4" />
@@ -451,10 +451,10 @@ export default function MyCasesPage() {
                   </button>
                 ) : (
                   <Link
-                    href="/dashboard?tab=assistant"
+                    href="/dashboard/file-case"
                     className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-court-maroon to-rose-700 text-white text-xs font-bold shadow-md hover:from-rose-700 hover:to-rose-800 transition-all"
                   >
-                    File New Grievance
+                    File New Case
                   </Link>
                 )}
               </div>
@@ -593,3 +593,4 @@ export default function MyCasesPage() {
     </div>
   );
 }
+

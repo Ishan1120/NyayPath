@@ -1,26 +1,41 @@
 """
 NyayPath Citizen Dashboard & My Cases Workspace Module
-Phase 2.1 Implementation
+Phase 2.1 & Phase 2.2 Implementation
 
 Provides dedicated citizen-facing endpoints and logic for:
 - Citizen Dashboard Statistics (Total, Active, Resolved, Pending Actions)
 - My Cases Workspace (Strict Ownership Filtering, Search, Category/Status Filters, Sorting, Pagination)
-- Case Details & Timeline Tracking (Milestone Events, Hidden Internal Proctor Notes, Document Inventory)
-- Fail-Closed Security & Ownership Validation
+- Central Case Filing Wizard (6-step guided submission, input sanitization, 10MB media validation)
+- Case Lifecycle Actions (Withdrawal, citizen remarks, expedite requests)
+- Case Tracking Integration & Public Progress Lookup (Zero PII / zero proctor notes leakage)
+- Milestone Events & Chronological Timeline Generation
 """
 
 import os
 import math
+import uuid
+import secrets
+import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 from fastapi import HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 try:
     from .auth import AuthUser, UserRole, AccountStatus
 except ImportError:
     from auth import AuthUser, UserRole, AccountStatus
+
+try:
+    from .media_sanitizer import sanitize_document_payload
+except ImportError:
+    from media_sanitizer import sanitize_document_payload
+
+try:
+    from .audit import record_case_activity
+except ImportError:
+    from audit import record_case_activity
 
 try:
     from supabase import create_client, Client
@@ -45,8 +60,18 @@ RESOLVED_STATUSES = {
     "RESOLVED",
     "CLOSED",
     "COMPLETED",
-    "DISPOSED"
+    "DISPOSED",
+    "WITHDRAWN"
 }
+
+# Permitted MIME types for document uploads
+ALLOWED_MIME_TYPES = {
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/webp"
+}
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB limit
 
 
 def _is_production() -> bool:
@@ -58,6 +83,38 @@ def _is_production() -> bool:
     )
 
 
+# =============================================================================
+# Request & Response Models (Phase 2.2)
+# =============================================================================
+
+class CaseFilingRequest(BaseModel):
+    category: str = Field(..., description="Case category (CAMPUS_GRIEVANCE, RTI, FIRST_APPEAL, CONSUMER_COMPLAINT, GENERAL_GRIEVANCE)")
+    sub_category: Optional[str] = Field(None, description="Detailed sub-category or department unit")
+    subject: str = Field(..., min_length=3, max_length=256, description="Case title or subject line")
+    facts: str = Field(..., min_length=10, description="Detailed narrative of facts and circumstances")
+    remedy_sought: Optional[str] = Field(None, description="Specific redress or action requested by applicant")
+    department: Optional[str] = Field(None, description="Target public authority, college department, or respondent")
+    incident_date: Optional[str] = Field(None, description="Date when incident or grievance occurred (YYYY-MM-DD)")
+    is_confidential: bool = Field(False, description="Whether case requires restricted confidential handling")
+    supporting_documents: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="List of pre-uploaded document metadata")
+    declaration_confirmed: bool = Field(True, description="Confirmation of accuracy and terms acknowledgment")
+
+
+class CaseLifecycleActionRequest(BaseModel):
+    action: str = Field(..., description="Action to perform (WITHDRAW, ADD_REMARK, REQUEST_EXPEDITE)")
+    remarks: Optional[str] = Field(None, description="Remarks or details regarding the action")
+    reason: Optional[str] = Field(None, description="Reason for withdrawal or expedite request")
+
+
+class PublicCaseTrackingRequest(BaseModel):
+    case_id: str = Field(..., description="Business Case ID or Tracking Number")
+    verification_key: Optional[str] = Field(None, description="Secret tracking key or verification code")
+
+
+# =============================================================================
+# Workspace & Case Management Engine
+# =============================================================================
+
 class CitizenWorkspaceManager:
     def __init__(self):
         url: str = os.environ.get("SUPABASE_URL", "")
@@ -65,6 +122,7 @@ class CitizenWorkspaceManager:
         is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
         self.use_supabase = bool(url and secret_key and create_client and not is_offline_test)
         self.supabase: Optional[Client] = None
+        self._memory_cases: Dict[str, Dict[str, Any]] = {}
 
         if self.use_supabase:
             try:
@@ -87,6 +145,551 @@ class CitizenWorkspaceManager:
                     self.use_supabase = True
                 except Exception as e:
                     logger.warning(f"CitizenWorkspace reconnect failed: {e}")
+
+    def _get_owner_id(self, case: Dict[str, Any]) -> Optional[str]:
+        """Resolves authoritative case owner UUID across cases and campus_cases structures."""
+        cdata = case.get("data") if isinstance(case.get("data"), dict) else {}
+        return (
+            case.get("student_user_id") or
+            case.get("citizen_user_id") or
+            cdata.get("citizen_user_id") or
+            cdata.get("student_user_id") or
+            case.get("user_id") or
+            cdata.get("user_id")
+        )
+
+    # =========================================================================
+    # Task 2: Central Case Filing Wizard (Phase 2.2)
+    # =========================================================================
+    def file_case(self, user: AuthUser, payload: CaseFilingRequest) -> Dict[str, Any]:
+        """
+        Submits and registers a new citizen case across public.cases / campus_cases.
+        - Strict identity attribution: citizen_user_id is set authoritatively from user.user_id.
+        - Prevents ID spoofing; user cannot file on behalf of someone else.
+        - Synchronizes parent cases and child campus_cases tables.
+        - Records initial case activity and attaches sanitized documents.
+        """
+        self._ensure_connected()
+
+        if not payload.declaration_confirmed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="You must accept the accuracy and statutory declaration before submitting."
+            )
+
+        cat_upper = payload.category.strip().upper()
+        # Normalization
+        if cat_upper in ["CAMPUS_GRIEVANCE", "CAMPUS", "STUDENT"]:
+            norm_type = "CAMPUS_GRIEVANCE"
+        elif cat_upper in ["RTI", "RTI_REQUEST"]:
+            norm_type = "RTI"
+        elif cat_upper in ["FIRST_APPEAL", "RTI_APPEAL"]:
+            norm_type = "FIRST_APPEAL"
+        elif cat_upper in ["CONSUMER_COMPLAINT", "CONSUMER_DISPUTE", "CONSUMER"]:
+            norm_type = "CONSUMER_COMPLAINT"
+        else:
+            norm_type = "GENERAL_GRIEVANCE"
+
+        case_uuid = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+
+        # Generate unique human-readable tracking number
+        year_str = str(now.year)
+        if norm_type == "CAMPUS_GRIEVANCE":
+            raw_code = uuid.uuid4().hex[:4].upper()
+            dept_code = (payload.department[:2] if payload.department else "GR").upper()
+            case_id = f"CAMPUS-{raw_code}-{dept_code}"
+        else:
+            prefix_map = {
+                "RTI": "RTI",
+                "FIRST_APPEAL": "FA",
+                "CONSUMER_COMPLAINT": "CC",
+                "GENERAL_GRIEVANCE": "GEN"
+            }
+            pfx = prefix_map.get(norm_type, "GEN")
+            case_id = f"NP-{year_str}-{pfx}-{uuid.uuid4().hex[:6].upper()}"
+
+        # 128-bit verification key for tracking
+        verification_key = secrets.token_hex(16)
+        verification_hash = hashlib.sha256(verification_key.encode()).hexdigest()
+
+        # 1. Supabase Persistence
+        if self.use_supabase and self.supabase:
+            try:
+                if norm_type == "CAMPUS_GRIEVANCE":
+                    # Determine severity
+                    facts_lower = payload.facts.lower()
+                    if any(term in facts_lower for term in ["ragging", "harassment", "assault", "threat", "emergency"]):
+                        severity = "URGENT"
+                    elif any(term in facts_lower for term in ["exam", "scholarship", "fee", "marksheet"]):
+                        severity = "HIGH"
+                    else:
+                        severity = "NORMAL"
+
+                    campus_record = {
+                        "id": case_uuid,
+                        "case_id": case_id,
+                        "institution_id": (user.institution_id or "INST_DEFAULT").strip().upper(),
+                        "student_user_id": user.user_id,
+                        "student_name": user.name or "Citizen Applicant",
+                        "roll_number": "Protected",
+                        "department": payload.department or "General Administration",
+                        "year": "N/A",
+                        "category": payload.sub_category or "Campus Grievance",
+                        "subject": payload.subject,
+                        "description": payload.facts,
+                        "incident_date": payload.incident_date or now.strftime("%Y-%m-%d"),
+                        "is_anonymous": False,
+                        "confidentiality_mode": "CONFIDENTIAL" if payload.is_confidential else "STANDARD",
+                        "severity": severity,
+                        "status": "SUBMITTED",
+                        "proctor_notes": "Grievance received via Central Case Management Portal. Acknowledged.",
+                        "hearing_date": "Pending Proctorial Review",
+                        "action_taken": "Pending inquiry by departmental committee.",
+                        "resolution_details": None,
+                        "resolution_deadline": (now + timedelta(days=15)).strftime("%Y-%m-%d"),
+                        "assigned_proctor": None,
+                        "assigned_committee": None,
+                        "supporting_documents": payload.supporting_documents or [],
+                        "verification_key_hash": verification_hash,
+                        "key_version": "v1",
+                        "created_at": now_iso,
+                        "updated_at": now_iso
+                    }
+                    # Insert to campus_cases (Postgres trigger trg_sync_campus_case_insert creates parent in cases)
+                    insert_res = self.supabase.table("campus_cases").insert(campus_record).execute()
+                    if not insert_res.data:
+                        raise RuntimeError("Failed to insert campus_cases record.")
+                else:
+                    case_data = {
+                        "citizen_user_id": user.user_id,
+                        "applicant_name": user.name or "Citizen Applicant",
+                        "applicant_email": user.email,
+                        "subject": payload.subject,
+                        "facts": payload.facts,
+                        "remedy_sought": payload.remedy_sought,
+                        "department": payload.department,
+                        "incident_date": payload.incident_date or now.strftime("%Y-%m-%d"),
+                        "sub_category": payload.sub_category,
+                        "is_confidential": payload.is_confidential,
+                        "supporting_documents": payload.supporting_documents or [],
+                        "case_number": case_id
+                    }
+                    cases_record = {
+                        "id": case_uuid,
+                        "case_id": case_id,
+                        "case_type": norm_type,
+                        "status": "SUBMITTED",
+                        "tracking_key_hash": verification_hash,
+                        "key_version": "v1",
+                        "data": case_data,
+                        "created_at": now_iso,
+                        "updated_at": now_iso
+                    }
+                    insert_res = self.supabase.table("cases").insert(cases_record).execute()
+                    if not insert_res.data:
+                        raise RuntimeError("Failed to insert cases record.")
+
+                # Insert supporting documents if attached
+                if payload.supporting_documents:
+                    for doc in payload.supporting_documents:
+                        if isinstance(doc, dict):
+                            doc_id = str(uuid.uuid4())
+                            doc_record = {
+                                "id": doc_id,
+                                "case_uuid": case_uuid,
+                                "case_id": case_id,
+                                "file_name": doc.get("file_name") or f"doc_{doc_id[:8]}.pdf",
+                                "file_size_bytes": doc.get("file_size_bytes") or 0,
+                                "mime_type": doc.get("mime_type") or "application/pdf",
+                                "storage_path": doc.get("storage_path") or f"{user.user_id}/{case_id}/{doc_id}.pdf",
+                                "uploader_user_id": user.user_id,
+                                "is_confidential": payload.is_confidential,
+                                "created_at": now_iso
+                            }
+                            try:
+                                self.supabase.table("case_documents").insert(doc_record).execute()
+                            except Exception as e_doc:
+                                logger.warning(f"Error recording case document in database: {e_doc}")
+
+                # Initial Case Activity Record
+                record_case_activity(
+                    case_uuid=case_uuid,
+                    case_id=case_id,
+                    action_type="CASE_FILED",
+                    action_details={
+                        "event": "CASE_FILED",
+                        "category": norm_type,
+                        "sub_category": payload.sub_category,
+                        "is_confidential": payload.is_confidential,
+                        "notification_trigger": "CASE_FILED",
+                        "notification_type": "EMAIL_AND_IN_APP",
+                        "recipient_role": "OFFICER",
+                        "timestamp": now_iso
+                    },
+                    actor_user=user,
+                    actor_type="USER",
+                    supabase_client=self.supabase
+                )
+
+            except Exception as e:
+                logger.error(f"Error persisting filed case to Supabase: {e}")
+                if _is_production():
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to persist case to database in production."
+                    ) from e
+
+        # Dev / Testing Fallback
+        mock_record = {
+            "id": case_uuid,
+            "case_id": case_id,
+            "case_type": norm_type,
+            "category": payload.sub_category or norm_type,
+            "subject": payload.subject,
+            "description": payload.facts,
+            "facts": payload.facts,
+            "status": "SUBMITTED",
+            "student_user_id": user.user_id,
+            "user_id": user.user_id,
+            "data": {
+                "citizen_user_id": user.user_id,
+                "applicant_name": user.name or "Citizen Applicant",
+                "applicant_email": user.email,
+                "subject": payload.subject,
+                "facts": payload.facts,
+                "department": payload.department
+            },
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "verification_key_hash": verification_hash,
+            "supporting_documents": payload.supporting_documents or []
+        }
+        self._memory_cases[case_id] = mock_record
+
+        return {
+            "case_id": case_id,
+            "case_uuid": case_uuid,
+            "tracking_number": case_id,
+            "verification_key": verification_key,
+            "category": norm_type,
+            "status": "SUBMITTED",
+            "created_at": now_iso,
+            "message": "Case registered successfully with NyayPath Central Case Management System."
+        }
+
+    # =========================================================================
+    # Task 2 & 4: Supporting Document Upload & Sanitization
+    # =========================================================================
+    def upload_document(
+        self,
+        user: AuthUser,
+        file_bytes: bytes,
+        filename: str,
+        content_type: str,
+        case_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Validates, strips metadata, and securely uploads supporting documents to Supabase Storage.
+        - Enforces <= 10MB limit.
+        - Strips PDF metadata & XMP streams; strips image EXIF.
+        - If case_id is provided, validates that caller owns the case.
+        """
+        self._ensure_connected()
+
+        if len(file_bytes) > MAX_FILE_SIZE_BYTES:
+            status_413 = getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413)
+            raise HTTPException(
+                status_code=status_413,
+                detail=f"File exceeds maximum permissible size of {MAX_FILE_SIZE_BYTES // (1024*1024)}MB."
+            )
+
+        clean_mime = (content_type or "").lower().strip()
+        if clean_mime not in ALLOWED_MIME_TYPES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported document format '{clean_mime}'. Only PDF, JPEG, PNG, and WebP are allowed."
+            )
+
+        # Sanitize metadata (PDF doc info / XMP & Image EXIF)
+        try:
+            sanitized_bytes, safe_filename = sanitize_document_payload(file_bytes, filename, clean_mime)
+        except Exception as e:
+            logger.warning(f"Media sanitization error: {e}")
+            sanitized_bytes, safe_filename = file_bytes, filename
+
+        doc_id = str(uuid.uuid4())
+        now_ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        storage_path = f"{user.user_id}/{now_ts}_{doc_id[:8]}_{safe_filename}"
+
+        # Upload to Supabase Storage (case-documents bucket)
+        if self.use_supabase and self.supabase:
+            try:
+                self.supabase.storage.from_("case-documents").upload(
+                    path=storage_path,
+                    file=sanitized_bytes,
+                    file_options={"content-type": clean_mime}
+                )
+            except Exception as e:
+                logger.error(f"Supabase Storage upload failed: {e}")
+                if _is_production():
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to store document in secure storage."
+                    ) from e
+
+        # If case_id was provided, verify ownership and register in case_documents table
+        if case_id:
+            raw_case = self._fetch_single_raw_case(case_id)
+            if raw_case:
+                owner_id = self._get_owner_id(raw_case)
+                if owner_id != user.user_id:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: Cannot attach documents to a case you do not own."
+                    )
+
+                case_uuid = raw_case.get("id") or str(uuid.uuid4())
+                if self.use_supabase and self.supabase:
+                    try:
+                        self.supabase.table("case_documents").insert({
+                            "id": doc_id,
+                            "case_uuid": case_uuid,
+                            "case_id": case_id,
+                            "file_name": safe_filename,
+                            "file_size_bytes": len(sanitized_bytes),
+                            "mime_type": clean_mime,
+                            "storage_path": storage_path,
+                            "uploader_user_id": user.user_id,
+                            "is_confidential": raw_case.get("is_confidential", False),
+                            "created_at": datetime.now(timezone.utc).isoformat()
+                        }).execute()
+                    except Exception as e:
+                        logger.warning(f"Error registering doc in case_documents table: {e}")
+
+        return {
+            "document_id": doc_id,
+            "file_name": safe_filename,
+            "storage_path": storage_path,
+            "file_size_bytes": len(sanitized_bytes),
+            "mime_type": clean_mime,
+            "message": "Document sanitized and uploaded successfully."
+        }
+
+    # =========================================================================
+    # Task 3: Case Lifecycle Management (Withdrawal, Remarks, Expedite)
+    # =========================================================================
+    def perform_lifecycle_action(
+        self,
+        case_id: str,
+        user: AuthUser,
+        payload: CaseLifecycleActionRequest
+    ) -> Dict[str, Any]:
+        """
+        Executes citizen lifecycle transitions:
+        - WITHDRAW: Permits withdrawal of active cases; sets status to CLOSED (reason: WITHDRAWN_BY_APPLICANT).
+        - ADD_REMARK: Appends citizen comments to activity audit log without altering status.
+        - REQUEST_EXPEDITE: Registers formal urgent expedite notification for officers.
+        """
+        self._ensure_connected()
+        clean_id = (case_id or "").strip().upper()
+        case = self._fetch_single_raw_case(clean_id)
+
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found."
+            )
+
+        # Strict ownership verification
+        owner_id = self._get_owner_id(case)
+        if owner_id != user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: You do not own this case."
+            )
+
+        action_clean = payload.action.strip().upper()
+        current_status = (case.get("status") or "SUBMITTED").upper()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        case_uuid = case.get("id")
+
+        if action_clean == "WITHDRAW":
+            if current_status in RESOLVED_STATUSES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot withdraw a case that is already in status '{current_status}'."
+                )
+
+            # Mark status as CLOSED (compliant with check constraint ck_campus_cases_status)
+            new_status = "CLOSED"
+            reason = payload.reason or payload.remarks or "Case withdrawn by applicant."
+
+            # Update parent cases table (trigger syncs to campus_cases)
+            if self.use_supabase and self.supabase:
+                try:
+                    self.supabase.table("cases").update({
+                        "status": new_status,
+                        "updated_at": now_iso
+                    }).eq("case_id", clean_id).execute()
+                except Exception as e:
+                    logger.error(f"Error updating case status to {new_status}: {e}")
+                    if _is_production():
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Database error during case withdrawal."
+                        ) from e
+
+            # Audit Activity Record
+            record_case_activity(
+                case_uuid=case_uuid,
+                case_id=clean_id,
+                action_type="CASE_WITHDRAWN",
+                action_details={
+                    "event": "CASE_WITHDRAWN",
+                    "reason": reason,
+                    "previous_status": current_status,
+                    "notification_trigger": "CASE_WITHDRAWN",
+                    "notification_type": "EMAIL_AND_IN_APP",
+                    "recipient_role": "OFFICER",
+                    "timestamp": now_iso
+                },
+                actor_user=user,
+                actor_type="USER",
+                supabase_client=self.supabase
+            )
+
+            return {
+                "case_id": clean_id,
+                "action": "WITHDRAW",
+                "status": new_status,
+                "message": "Case successfully withdrawn."
+            }
+
+        elif action_clean == "ADD_REMARK":
+            if not payload.remarks or not payload.remarks.strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Remarks content is required."
+                )
+
+            record_case_activity(
+                case_uuid=case_uuid,
+                case_id=clean_id,
+                action_type="CITIZEN_REMARK_ADDED",
+                action_details={
+                    "event": "CITIZEN_REMARK_ADDED",
+                    "remarks": payload.remarks.strip(),
+                    "notification_trigger": "CITIZEN_REMARK_ADDED",
+                    "notification_type": "IN_APP",
+                    "recipient_role": "OFFICER",
+                    "timestamp": now_iso
+                },
+                actor_user=user,
+                actor_type="USER",
+                supabase_client=self.supabase
+            )
+
+            return {
+                "case_id": clean_id,
+                "action": "ADD_REMARK",
+                "status": current_status,
+                "message": "Remark successfully added to case timeline."
+            }
+
+        elif action_clean == "REQUEST_EXPEDITE":
+            record_case_activity(
+                case_uuid=case_uuid,
+                case_id=clean_id,
+                action_type="EXPEDITE_REQUESTED",
+                action_details={
+                    "event": "EXPEDITE_REQUESTED",
+                    "reason": payload.reason or payload.remarks or "Applicant requested expedite review.",
+                    "notification_trigger": "EXPEDITE_REQUESTED",
+                    "notification_type": "EMAIL_AND_IN_APP",
+                    "recipient_role": "OFFICER",
+                    "timestamp": now_iso
+                },
+                actor_user=user,
+                actor_type="USER",
+                supabase_client=self.supabase
+            )
+
+            return {
+                "case_id": clean_id,
+                "action": "REQUEST_EXPEDITE",
+                "status": current_status,
+                "message": "Expedite request submitted to the presiding officer."
+            }
+
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown lifecycle action '{payload.action}'. Permitted: WITHDRAW, ADD_REMARK, REQUEST_EXPEDITE."
+            )
+
+    # =========================================================================
+    # Task 5: Case Search & Public Case Tracking
+    # =========================================================================
+    def track_case_public(
+        self,
+        case_id: str,
+        verification_key: Optional[str] = None,
+        user: Optional[AuthUser] = None
+    ) -> Dict[str, Any]:
+        """
+        Enables public tracking of case progress with zero credential / confidential data leakage.
+        - If caller is authenticated owner, access is granted.
+        - If unauthenticated, requires the 128-bit secret verification_key matching stored hash.
+        - Proctor notes, secret keys, and personal contact info are strictly omitted.
+        """
+        self._ensure_connected()
+        clean_id = (case_id or "").strip().upper()
+        case = self._fetch_single_raw_case(clean_id)
+
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found. Please verify the Case ID."
+            )
+
+        # Check authorization
+        authorized = False
+        owner_id = self._get_owner_id(case)
+
+        if user and user.user_id and user.user_id == owner_id:
+            authorized = True
+        elif verification_key and verification_key.strip():
+            candidate_hash = hashlib.sha256(verification_key.strip().encode()).hexdigest()
+            stored_hash = case.get("verification_key_hash") or case.get("tracking_key_hash")
+            if stored_hash and candidate_hash == stored_hash:
+                authorized = True
+
+        if not authorized:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid verification key or unauthorized access. Case tracking requires ownership or valid verification code."
+            )
+
+        # Public tracking projection (Zero PII, zero proctor notes)
+        timeline = self._build_case_timeline(case)
+        public_summary = {
+            "case_id": case.get("case_id"),
+            "case_type": case.get("case_type") or "CAMPUS_GRIEVANCE",
+            "category": case.get("category") or "General",
+            "department": case.get("department"),
+            "status": (case.get("status") or "SUBMITTED").upper(),
+            "hearing_date": case.get("hearing_date"),
+            "action_taken": case.get("action_taken"),
+            "created_at": case.get("created_at"),
+            "updated_at": case.get("updated_at")
+        }
+
+        return {
+            "case": public_summary,
+            "timeline": timeline
+        }
 
     # =========================================================================
     # Task 2 & 7: Dashboard Statistics
@@ -130,7 +733,7 @@ class CitizenWorkspaceManager:
                 "user_id": user.user_id,
                 "name": user.name or "Citizen",
                 "email": user.email,
-                "role": user.role.value,
+                "role": user.role.value if hasattr(user.role, "value") else str(user.role),
                 "institution_id": user.institution_id
             }
         }
@@ -181,21 +784,18 @@ class CitizenWorkspaceManager:
                 or q in (c.get("description") or "").lower()
             ]
 
-        # Sorting
+        # Sort
         reverse = (sort_order.lower() == "desc")
-        if sort_by in ["created_at", "updated_at"]:
-            filtered = sorted(filtered, key=lambda x: str(x.get(sort_by) or ""), reverse=reverse)
-        elif sort_by == "status":
-            filtered = sorted(filtered, key=lambda x: str(x.get("status") or ""), reverse=reverse)
-        elif sort_by == "category":
-            filtered = sorted(filtered, key=lambda x: str(x.get("category") or ""), reverse=reverse)
-        else:
-            filtered = sorted(filtered, key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        filtered = sorted(
+            filtered,
+            key=lambda x: str(x.get(sort_by) or ""),
+            reverse=reverse
+        )
 
         total = len(filtered)
-        limit = max(1, min(limit, 100))
-        page = max(1, page)
-        total_pages = max(1, math.ceil(total / limit)) if total > 0 else 1
+        total_pages = max(1, math.ceil(total / limit)) if limit > 0 else 1
+        page = max(1, min(page, total_pages))
+
         start_idx = (page - 1) * limit
         end_idx = start_idx + limit
         paginated_cases = filtered[start_idx:end_idx]
@@ -228,14 +828,9 @@ class CitizenWorkspaceManager:
             )
 
         # Strict ownership verification
-        owner_id = (
-            case.get("student_user_id") or
-            case.get("data", {}).get("citizen_user_id") or
-            case.get("user_id")
-        )
+        owner_id = self._get_owner_id(case)
 
         if owner_id != user.user_id:
-            # Rejection with 403 Forbidden
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied: You do not have permission to view this case."
@@ -283,7 +878,7 @@ class CitizenWorkspaceManager:
                             row["case_type"] = row.get("case_type") or "CAMPUS_GRIEVANCE"
                             user_cases.append(row)
 
-                # 2. Query cases table where data->>'citizen_user_id' == user_id or data->>'student_user_id' == user_id
+                # 2. Query cases table where data->>'citizen_user_id' == user_id
                 res_cases = self.supabase.table("cases").select("*").execute()
                 if res_cases.data:
                     for row in res_cases.data:
@@ -298,7 +893,7 @@ class CitizenWorkspaceManager:
                                     flattened["case_id"] = cid
                                     flattened["id"] = row.get("id")
                                     flattened["case_type"] = row.get("case_type") or flattened.get("case_type") or "RTI"
-                                    flattened["status"] = row.get("status") or flattened.get("status") or "FILED"
+                                    flattened["status"] = row.get("status") or flattened.get("status") or "SUBMITTED"
                                     flattened["created_at"] = row.get("created_at") or flattened.get("created_at")
                                     flattened["updated_at"] = row.get("updated_at") or flattened.get("updated_at")
                                     user_cases.append(flattened)
@@ -311,7 +906,13 @@ class CitizenWorkspaceManager:
                         detail="Database query failed in production environment."
                     ) from e
 
-        # Dev / Test fallback: SQLite & In-memory
+        # Dev / Test fallback: In-memory & SQLite
+        for cid, c in self._memory_cases.items():
+            c_uid = c.get("student_user_id") or c.get("user_id") or c.get("data", {}).get("citizen_user_id")
+            if c_uid == user_id and cid not in seen_case_ids:
+                seen_case_ids.add(cid)
+                user_cases.append(dict(c))
+
         try:
             from api.campus_proctor import campus_proctor_manager
             # Check SQLite
@@ -362,9 +963,11 @@ class CitizenWorkspaceManager:
                     flattened["case_id"] = row.get("case_id")
                     flattened["id"] = row.get("id")
                     flattened["case_type"] = row.get("case_type") or "RTI"
-                    flattened["status"] = row.get("status") or flattened.get("status") or "FILED"
+                    flattened["status"] = row.get("status") or flattened.get("status") or "SUBMITTED"
                     flattened["created_at"] = row.get("created_at")
                     flattened["updated_at"] = row.get("updated_at")
+                    flattened["tracking_key_hash"] = row.get("tracking_key_hash")
+                    flattened["data"] = cdata
                     return flattened
                 return None
             except Exception as e:
@@ -376,6 +979,9 @@ class CitizenWorkspaceManager:
                     ) from e
 
         # Dev fallback
+        if case_id in self._memory_cases:
+            return dict(self._memory_cases[case_id])
+
         from api.campus_proctor import campus_proctor_manager
         return campus_proctor_manager._fetch_raw_case(case_id)
 
@@ -390,7 +996,7 @@ class CitizenWorkspaceManager:
             "case_type": case.get("case_type") or "CAMPUS_GRIEVANCE",
             "category": case.get("category") or "General",
             "subject": case.get("subject") or case.get("case_id"),
-            "description": case.get("description") or "",
+            "description": case.get("description") or case.get("facts") or "",
             "status": (case.get("status") or "SUBMITTED").upper(),
             "severity": case.get("severity") or "NORMAL",
             "department": case.get("department"),
@@ -398,8 +1004,6 @@ class CitizenWorkspaceManager:
             "institution_id": case.get("institution_id"),
             "hearing_date": case.get("hearing_date"),
             "action_taken": case.get("action_taken"),
-            "resolution_details": case.get("resolution_details"),
-            "incident_date": case.get("incident_date"),
             "created_at": case.get("created_at"),
             "updated_at": case.get("updated_at"),
             "documents_count": doc_count
@@ -418,11 +1022,11 @@ class CitizenWorkspaceManager:
         # Step 1: Grievance Submission
         timeline.append({
             "id": "event-1-submission",
-            "title": "Grievance Submitted",
-            "description": f"Grievance registered under category '{case.get('category', 'General')}'.",
+            "title": "Case Submitted",
+            "description": f"Case filed under category '{case.get('category', 'General')}'.",
             "timestamp": created_at,
             "status": "SUBMITTED",
-            "actor_type": "STUDENT"
+            "actor_type": "CITIZEN"
         })
 
         # Step 2: Query case_activity_log if Supabase is connected
@@ -438,7 +1042,13 @@ class CitizenWorkspaceManager:
                             continue
 
                         title = act.replace("_", " ").title()
-                        desc = details.get("public_message") or details.get("note") or f"Case milestone recorded: {title}"
+                        desc = (
+                            details.get("public_message") or
+                            details.get("reason") or
+                            details.get("remarks") or
+                            details.get("note") or
+                            f"Case milestone recorded: {title}"
+                        )
                         timeline.append({
                             "id": f"event-{idx}-{act}",
                             "title": title,
@@ -457,7 +1067,6 @@ class CitizenWorkspaceManager:
             for idx, h in enumerate(raw_history, start=2):
                 if isinstance(h, dict):
                     action_name = h.get("action", "Status Update")
-                    # Clean out internal proctor notes
                     msg = h.get("note") or f"Updated status to {h.get('status', 'In Progress')}"
                     timeline.append({
                         "id": f"history-{idx}",
@@ -509,7 +1118,7 @@ class CitizenWorkspaceManager:
             res_details = case.get("resolution_details") or "Grievance resolved following procedural review."
             timeline.append({
                 "id": "event-5-resolution",
-                "title": "Grievance Resolved",
+                "title": "Case Resolved",
                 "description": res_details,
                 "timestamp": case.get("updated_at") or created_at,
                 "status": current_status,

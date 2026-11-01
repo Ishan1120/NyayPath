@@ -335,8 +335,8 @@ export default function DashboardPage() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {/* 1. File New Grievance */}
-                <button
-                  onClick={() => setActiveTab('assistant')}
+                <Link
+                  href="/dashboard/file-case"
                   className="p-5 rounded-3xl bg-white border border-slate-200 hover:border-court-maroon/50 shadow-sm hover:shadow-md transition-all text-left flex items-start gap-4 group cursor-pointer"
                 >
                   <div className="p-3 rounded-2xl bg-rose-50 text-court-maroon group-hover:bg-court-maroon group-hover:text-white transition-colors shrink-0">
@@ -344,13 +344,13 @@ export default function DashboardPage() {
                   </div>
                   <div>
                     <h4 className="text-sm font-bold text-slate-900 group-hover:text-court-maroon transition-colors">
-                      File New Grievance / RTI
+                      File New Case / Grievance
                     </h4>
                     <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                      Use AI assistance to draft formal grievances, RTIs, and first appeals with automatic legal citation.
+                      Unified 6-step guided filing wizard across Campus Grievance, RTI, Consumer, and Appeals.
                     </p>
                   </div>
-                </button>
+                </Link>
 
                 {/* 2. My Cases Workspace */}
                 <Link
