@@ -2159,6 +2159,10 @@ print("\n" + "=" * 70)
 print("  ALL NYAYPATH PHASE 1.2 + 1.3.4 + 1.3.5 + 1.3.6 + 1.3.7 + 1.3.9 TESTS COMPLETED SUCCESSFULLY!")
 print("=" * 70 + "\n")
 
+# Clean up environment to prevent state poisoning in subsequent test suites
+os.environ["SUPABASE_OFFLINE_TEST"] = "0"
+
+
 
 
 

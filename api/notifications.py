@@ -102,16 +102,22 @@ class NotificationManager:
                     raise RuntimeError("Persistent database required for notifications in production.") from e
 
     def _ensure_connected(self):
-        if not self.use_supabase or not self.supabase:
-            url = os.environ.get("SUPABASE_URL", "")
-            secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
-            is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
-            if url and secret_key and create_client and not is_offline_test:
-                try:
-                    self.supabase = create_client(url, secret_key)
-                    self.use_supabase = True
-                except Exception as e:
-                    logger.warning(f"NotificationManager reconnect failed: {e}")
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        if is_offline_test:
+            self.use_supabase = False
+            self.supabase = None
+            return
+
+        url = os.environ.get("SUPABASE_URL", "")
+        secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
+        if url and secret_key and create_client and not self.supabase:
+            try:
+                self.supabase = create_client(url, secret_key)
+                self.use_supabase = True
+            except Exception as e:
+                logger.warning(f"NotificationManager reconnect failed: {e}")
+                self.use_supabase = False
+                self.supabase = None
 
     # -------------------------------------------------------------------------
     # Core Dispatch Engine

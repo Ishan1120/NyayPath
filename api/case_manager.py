@@ -50,11 +50,30 @@ class CaseManager:
         else:
             logger.warning("WARNING: Supabase credentials missing. Falling back to in-memory storage.")
 
+    def _ensure_connected(self):
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        if is_offline_test:
+            self.use_supabase = False
+            self.supabase = None
+            return
+
+        url: str = os.environ.get("SUPABASE_URL", "")
+        secret_key: str = os.environ.get("SUPABASE_SECRET_KEY", "")
+        if url and secret_key and create_client and not self.supabase:
+            try:
+                self.supabase: Client = create_client(url, secret_key)
+                self.use_supabase = True
+            except Exception as e:
+                logger.error(f"Supabase reconnection error: {e}")
+                self.use_supabase = False
+                self.supabase = None
+
     def _generate_case_id(self) -> str:
         chars = string.ascii_uppercase + string.digits
         return f"CR-{''.join(random.choices(chars, k=4))}-{''.join(random.choices(chars, k=4))}"
 
     def create_case(self, life_liberty: bool = False, tracking_credential: Optional[str] = None) -> str:
+        self._ensure_connected()
         case_id = self._generate_case_id()
         internal_uuid = str(uuid.uuid4())
         now_dt = datetime.now(timezone.utc)
@@ -161,6 +180,7 @@ class CaseManager:
         if not case_id:
             return None
 
+        self._ensure_connected()
         clean_id = case_id.strip().upper()
 
         if self.use_supabase:
@@ -183,6 +203,7 @@ class CaseManager:
         """
         Retrieves active cases where watchdog is active (status not CLOSED).
         """
+        self._ensure_connected()
         active_cases: List[Dict[str, Any]] = []
 
         if self.use_supabase:
@@ -213,6 +234,7 @@ class CaseManager:
         if not case_id:
             return {}
 
+        self._ensure_connected()
         clean_id = case_id.strip().upper()
         current_data = self.get_case(clean_id)
         

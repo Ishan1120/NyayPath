@@ -245,9 +245,42 @@ class CampusProctorManager:
         Validates that persistent storage is available.
         In production, raises HTTP 503 if Supabase is disconnected.
         """
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        if is_offline_test:
+            self.use_supabase = False
+            self.supabase = None
+        else:
+            url: str = os.environ.get("SUPABASE_URL", "")
+            secret_key: str = os.environ.get("SUPABASE_SECRET_KEY", "")
+            if url and secret_key and create_client and not self.supabase:
+                try:
+                    self.supabase = create_client(url, secret_key)
+                    self.use_supabase = True
+                except Exception as e:
+                    logger.warning(f"Campus Proctor reconnect failed: {e}")
+                    self.use_supabase = False
+                    self.supabase = None
+
         if self.use_supabase and self.supabase is not None:
             return
-        if not self.allow_local_sqlite:
+
+        is_production = (
+            os.environ.get("VERCEL") == "1" or
+            os.environ.get("NODE_ENV") == "production" or
+            os.environ.get("ENV") == "production" or
+            os.environ.get("ENVIRONMENT") == "production"
+        )
+        explicit_allow = os.environ.get("ALLOW_LOCAL_SQLITE")
+        explicit_test = os.environ.get("TEST_MODE")
+
+        if explicit_allow == "0" or explicit_test == "0":
+            allow = False
+        elif explicit_allow == "1" or explicit_test == "1":
+            allow = True
+        else:
+            allow = not is_production
+
+        if not allow:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Database unavailable: Persistent Supabase database connection required. Ephemeral storage is strictly disabled in production."
@@ -566,6 +599,14 @@ class CampusProctorManager:
         case = self._fetch_raw_case(clean_id)
         if not case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
+
+        # Cross-case-type rejection: Campus proctor can only manage CAMPUS_GRIEVANCE cases
+        case_type = case.get("case_type")
+        if case_type and case_type != "CAMPUS_GRIEVANCE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cross-case-type rejection: Case '{clean_id}' is of type '{case_type}' and is not a campus grievance."
+            )
 
         # Institutional boundary enforcement
         verify_institutional_boundary(proctor_user, case.get("institution_id", "INST_DEFAULT"))
@@ -927,9 +968,10 @@ Student Grievance Redressal Committee (SGRC)
                 history = ?, updated_at = ?
             WHERE case_id = ?
         """, (
-            r["status"], r["proctor_notes"], r["hearing_date"], r["action_taken"],
-            r["resolution_details"], r["assigned_proctor"], r["assigned_committee"],
-            json.dumps(r["history"]), r["updated_at"], r["case_id"]
+            r.get("status"), r.get("proctor_notes"), r.get("hearing_date"), r.get("action_taken"),
+            r.get("resolution_details"), r.get("assigned_proctor"), r.get("assigned_committee"),
+            json.dumps(r.get("history") if isinstance(r.get("history"), list) else []),
+            r.get("updated_at"), r.get("case_id")
         ))
         conn.commit()
         conn.close()
@@ -963,6 +1005,14 @@ Student Grievance Redressal Committee (SGRC)
         case = self._fetch_raw_case(clean_id)
         if not case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
+
+        # Cross-case-type rejection: Campus proctor can only manage CAMPUS_GRIEVANCE cases
+        case_type = case.get("case_type")
+        if case_type and case_type != "CAMPUS_GRIEVANCE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cross-case-type rejection: Case '{clean_id}' is of type '{case_type}' and is not a campus grievance."
+            )
 
         # Institutional boundary enforcement for assigner
         verify_institutional_boundary(assigner_user, case.get("institution_id", "INST_DEFAULT"))
@@ -1071,6 +1121,14 @@ Student Grievance Redressal Committee (SGRC)
         if not case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
 
+        # Cross-case-type rejection: Campus proctor can only manage CAMPUS_GRIEVANCE cases
+        case_type = case.get("case_type")
+        if case_type and case_type != "CAMPUS_GRIEVANCE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cross-case-type rejection: Case '{clean_id}' is of type '{case_type}' and is not a campus grievance."
+            )
+
         verify_institutional_boundary(revoker_user, case.get("institution_id", "INST_DEFAULT"))
 
         if self.use_supabase and self.supabase:
@@ -1156,6 +1214,14 @@ Student Grievance Redressal Committee (SGRC)
         case = self._fetch_raw_case(clean_id)
         if not case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
+
+        # Cross-case-type rejection: Campus proctor can only manage CAMPUS_GRIEVANCE cases
+        case_type = case.get("case_type")
+        if case_type and case_type != "CAMPUS_GRIEVANCE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cross-case-type rejection: Case '{clean_id}' is of type '{case_type}' and is not a campus grievance."
+            )
 
         verify_institutional_boundary(officer_user, case.get("institution_id", "INST_DEFAULT"))
 
@@ -1716,6 +1782,14 @@ Student Grievance Redressal Committee (SGRC)
         case = self._fetch_raw_case(clean_id)
         if not case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Case '{clean_id}' not found.")
+
+        # Cross-case-type rejection: Campus proctor can only manage CAMPUS_GRIEVANCE cases
+        case_type = case.get("case_type")
+        if case_type and case_type != "CAMPUS_GRIEVANCE":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cross-case-type rejection: Case '{clean_id}' is of type '{case_type}' and is not a campus grievance."
+            )
 
         verify_institutional_boundary(member_user, case.get("institution_id", "INST_DEFAULT"))
 

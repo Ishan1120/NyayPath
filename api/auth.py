@@ -1033,7 +1033,7 @@ def require_platform_admin(request: Request) -> AuthUser:
     """
     Enforces authoritative Platform Administrator verification.
     1. Checks authenticated user role is UserRole.PLATFORM_ADMIN.
-    2. Validates live account status in public.platform_admins if Supabase is connected.
+    2. Validates live account status in public.platform_admins.
     3. Fails closed with 403 Forbidden on missing or non-active admin records.
     """
     user = get_current_authenticated_user(request)
@@ -1043,31 +1043,6 @@ def require_platform_admin(request: Request) -> AuthUser:
             detail=f"Access denied: Role '{user.role.value}' lacks platform administrator privileges."
         )
 
-    # Database-backed live verification if database is connected
-    if os.environ.get("SUPABASE_OFFLINE_TEST") != "1":
-        try:
-            from api.platform_admin import platform_admin_manager
-            sb_client = platform_admin_manager.supabase
-            if sb_client is not None:
-                res = sb_client.table("platform_admins").select("id, account_status").eq("user_id", str(user.user_id)).execute()
-                if not res or not res.data or len(res.data) == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Access denied: No authoritative platform administrator record found."
-                    )
-                status_val = (res.data[0].get("account_status") or "").strip().lower()
-                if status_val != "active":
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"Access denied: Platform administrator account is {status_val}."
-                    )
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Error checking platform_admins table: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied: Unable to verify authoritative platform administrator status."
-            )
-
+    from api.platform_admin import platform_admin_manager
+    platform_admin_manager.verify_platform_admin(user)
     return user

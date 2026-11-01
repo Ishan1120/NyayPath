@@ -140,16 +140,22 @@ class CommunicationManager:
                     raise RuntimeError("Persistent database required in production.") from e
 
     def _ensure_connected(self):
-        if not self.use_supabase or not self.supabase:
-            url = os.environ.get("SUPABASE_URL", "")
-            secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
-            is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
-            if url and secret_key and create_client and not is_offline_test:
-                try:
-                    self.supabase = create_client(url, secret_key)
-                    self.use_supabase = True
-                except Exception as e:
-                    logger.warning(f"CommunicationManager reconnect failed: {e}")
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        if is_offline_test:
+            self.use_supabase = False
+            self.supabase = None
+            return
+
+        url = os.environ.get("SUPABASE_URL", "")
+        secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
+        if url and secret_key and create_client and not self.supabase:
+            try:
+                self.supabase = create_client(url, secret_key)
+                self.use_supabase = True
+            except Exception as e:
+                logger.warning(f"CommunicationManager reconnect failed: {e}")
+                self.use_supabase = False
+                self.supabase = None
 
     def _verify_lawyer_case_access(
         self,
@@ -1066,7 +1072,7 @@ class CommunicationManager:
             self.supabase.table("consultation_meetings").insert(meeting_record).execute()
         except Exception as e:
             err_str = str(e).lower()
-            if "exclude" in err_str or "23p01" in err_str or "conflict" in err_str:
+            if any(k in err_str for k in ("exclude", "23p01", "conflict", "deadlock", "40p01", "40001")):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Time slot conflict: Advocate already has a confirmed meeting scheduled during this window."
@@ -1157,7 +1163,7 @@ class CommunicationManager:
             res = self.supabase.table("consultation_meetings").update(update_dict).eq("id", clean_id).execute()
         except Exception as e:
             err_str = str(e).lower()
-            if "exclude" in err_str or "23p01" in err_str or "conflict" in err_str:
+            if any(k in err_str for k in ("exclude", "23p01", "conflict", "deadlock", "40p01", "40001")):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Cannot confirm: You have an overlapping confirmed meeting."

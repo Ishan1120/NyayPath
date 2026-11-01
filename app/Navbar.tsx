@@ -25,7 +25,8 @@ import {
   Building,
   MessageSquare,
   Calendar,
-  ShieldCheck
+  ShieldCheck,
+  LogOut
 } from "lucide-react";
 import Link from "next/link";
 import {
@@ -80,6 +81,22 @@ export default function Navbar() {
       }
     }
   }, []);
+
+  const handleLogout = () => {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("nyaypath_platform_admin_token");
+      localStorage.removeItem("nyaypath_citizen_token");
+      localStorage.removeItem("nyaypath_lawyer_token");
+      localStorage.removeItem("nyaypath_proctor_token");
+      localStorage.removeItem("nyaypath_token");
+      localStorage.removeItem("nyaypath_user_role");
+      localStorage.removeItem("nyaypath_user");
+      setIsLoggedIn(false);
+      setIsLawyer(false);
+      setIsPlatformAdmin(false);
+      router.push("/");
+    }
+  };
 
   // Periodic polling for unread notifications every 30 seconds
   useEffect(() => {
@@ -244,7 +261,7 @@ export default function Navbar() {
             </Link>
 
             {/* Desktop Navigation Links */}
-            <div className="hidden lg:flex items-center gap-5 text-xs font-bold tracking-tight text-slate-700 uppercase">
+            <div className="hidden xl:flex items-center gap-3.5 2xl:gap-5 text-xs font-bold tracking-tight text-slate-700 uppercase">
               {navLinks.map((link) => {
                 const Icon = link.icon;
                 return (
@@ -396,9 +413,21 @@ export default function Navbar() {
                 <span>Launch Engine</span>
               </button>
 
+              {isLoggedIn && (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  title="Sign Out"
+                  aria-label="Sign Out"
+                  className="p-2 rounded-full text-slate-500 hover:text-rose-700 hover:bg-rose-50 transition-colors cursor-pointer border border-slate-200/60"
+                >
+                  <LogOut className="w-4 h-4" />
+                </button>
+              )}
+
               <button
                 onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-                className="lg:hidden p-1.5 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                className="xl:hidden p-1.5 text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                 aria-label="Toggle Navigation"
               >
                 {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
@@ -409,7 +438,7 @@ export default function Navbar() {
 
         {/* Mobile Navigation Drawer */}
         {mobileMenuOpen && (
-          <div className="lg:hidden border-t border-slate-200 px-4 pt-3 pb-4 space-y-1 bg-white rounded-b-3xl mt-1 shadow-xl">
+          <div className="xl:hidden border-t border-slate-200 px-4 pt-3 pb-4 space-y-1 bg-white rounded-b-3xl mt-1 shadow-xl">
             {navLinks.map((link) => {
               const Icon = link.icon;
               return (
@@ -439,6 +468,16 @@ export default function Navbar() {
                 </span>
               )}
             </Link>
+            {isLoggedIn && (
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-xs font-bold text-rose-700 hover:bg-rose-50 transition-colors text-left cursor-pointer"
+              >
+                <LogOut size={15} />
+                <span>Sign Out</span>
+              </button>
+            )}
           </div>
         )}
       </nav>

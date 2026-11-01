@@ -20,6 +20,7 @@ import {
   ArrowRight
 } from 'lucide-react';
 import Navbar from '@/app/Navbar';
+import { loginProctor } from '@/lib/api';
 
 interface AdminLayoutProps {
   children: React.ReactNode;
@@ -64,22 +65,23 @@ export default function AdminLayout({
     }
   }, []);
 
-  const handleDevLogin = () => {
+  const handleDevLogin = async () => {
     if (typeof window !== 'undefined') {
-      // Set platform admin demo credentials
-      localStorage.setItem('nyaypath_platform_admin_token', 'platform_admin_demo_session');
-      localStorage.setItem('nyaypath_user_role', 'platform_admin');
-      localStorage.setItem(
-        'nyaypath_user',
-        JSON.stringify({
-          user_id: '99999999-1111-2222-3333-999999999999',
+      try {
+        const res = await loginProctor({
           email: 'platform@nyaypath.gov',
-          role: 'platform_admin',
-          full_name: 'Platform Administrator'
-        })
-      );
-      setIsAuthenticated(true);
-      window.location.reload();
+          password: 'ProctorPass@2026!'
+        });
+        if (res && res.token) {
+          localStorage.setItem('nyaypath_platform_admin_token', res.token);
+          localStorage.setItem('nyaypath_user_role', 'platform_admin');
+          localStorage.setItem('nyaypath_user', JSON.stringify(res.user));
+          setIsAuthenticated(true);
+          window.location.reload();
+        }
+      } catch (err) {
+        console.error('Platform admin authentication failed:', err);
+      }
     }
   };
 

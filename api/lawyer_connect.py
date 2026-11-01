@@ -107,11 +107,19 @@ class LawyerConnectManager:
         self._ensure_connected()
 
     def _ensure_connected(self):
-        if not self.supabase and self.supabase_url and self.supabase_key and create_client:
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        if is_offline_test:
+            self.supabase = None
+            return
+
+        url = os.environ.get("SUPABASE_URL", "")
+        secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
+        if url and secret_key and create_client and not self.supabase:
             try:
-                self.supabase = create_client(self.supabase_url, self.supabase_key)
+                self.supabase = create_client(url, secret_key)
             except Exception as e:
                 logger.error(f"Failed to connect Supabase in LawyerConnectManager: {e}")
+                self.supabase = None
 
     # -----------------------------------------------------------------
     # Lawyer Registration & Profile Management

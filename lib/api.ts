@@ -8,12 +8,31 @@ const api = axios.create({
 // Automatic authorization header interceptor for authenticated Citizen/Proctor/Committee/Admin sessions
 api.interceptors.request.use((config) => {
   if (typeof window !== 'undefined') {
-    const token = 
-      localStorage.getItem('nyaypath_platform_admin_token') ||
-      localStorage.getItem('nyaypath_citizen_token') ||
-      localStorage.getItem('nyaypath_lawyer_token') ||
-      localStorage.getItem('nyaypath_token') ||
-      localStorage.getItem('nyaypath_proctor_token');
+    const path = window.location.pathname || '';
+    let token: string | null = null;
+    
+    if (path.startsWith('/admin')) {
+      token = localStorage.getItem('nyaypath_platform_admin_token') || localStorage.getItem('nyaypath_token');
+    } else if (path.startsWith('/campus-proctor') || path.startsWith('/institution')) {
+      token = localStorage.getItem('nyaypath_proctor_token') || localStorage.getItem('nyaypath_token');
+    } else if (path.startsWith('/lawyer')) {
+      token = localStorage.getItem('nyaypath_lawyer_token') || localStorage.getItem('nyaypath_token');
+    } else if (path.startsWith('/dashboard') || path.startsWith('/messages')) {
+      token = 
+        localStorage.getItem('nyaypath_citizen_token') || 
+        localStorage.getItem('nyaypath_lawyer_token') || 
+        localStorage.getItem('nyaypath_proctor_token') || 
+        localStorage.getItem('nyaypath_platform_admin_token') || 
+        localStorage.getItem('nyaypath_token');
+    } else {
+      token = 
+        localStorage.getItem('nyaypath_token') ||
+        localStorage.getItem('nyaypath_citizen_token') ||
+        localStorage.getItem('nyaypath_lawyer_token') ||
+        localStorage.getItem('nyaypath_proctor_token') ||
+        localStorage.getItem('nyaypath_platform_admin_token');
+    }
+
     if (token && !config.headers.Authorization) {
       config.headers.Authorization = `Bearer ${token}`;
     }

@@ -145,16 +145,22 @@ class CitizenWorkspaceManager:
                     raise RuntimeError("Persistent database required in production.") from e
 
     def _ensure_connected(self):
-        if not self.use_supabase or not self.supabase:
-            url: str = os.environ.get("SUPABASE_URL", "")
-            secret_key: str = os.environ.get("SUPABASE_SECRET_KEY", "")
-            is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
-            if url and secret_key and create_client and not is_offline_test:
-                try:
-                    self.supabase = create_client(url, secret_key)
-                    self.use_supabase = True
-                except Exception as e:
-                    logger.warning(f"CitizenWorkspace reconnect failed: {e}")
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        if is_offline_test:
+            self.use_supabase = False
+            self.supabase = None
+            return
+
+        url: str = os.environ.get("SUPABASE_URL", "")
+        secret_key: str = os.environ.get("SUPABASE_SECRET_KEY", "")
+        if url and secret_key and create_client and not self.supabase:
+            try:
+                self.supabase = create_client(url, secret_key)
+                self.use_supabase = True
+            except Exception as e:
+                logger.warning(f"CitizenWorkspace reconnect failed: {e}")
+                self.use_supabase = False
+                self.supabase = None
 
     def _get_owner_id(self, case: Dict[str, Any]) -> Optional[str]:
         """Resolves authoritative case owner UUID across cases and campus_cases structures."""

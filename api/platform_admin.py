@@ -97,16 +97,22 @@ class PlatformAdminManager:
                 self.use_supabase = False
 
     def _ensure_connected(self):
-        if not self.use_supabase or not self.supabase:
-            url = os.environ.get("SUPABASE_URL", "")
-            secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
-            is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
-            if url and secret_key and create_client and not is_offline_test:
-                try:
-                    self.supabase = create_client(url, secret_key)
-                    self.use_supabase = True
-                except Exception as e:
-                    logger.warning(f"PlatformAdminManager reconnect failed: {e}")
+        is_offline_test = os.environ.get("SUPABASE_OFFLINE_TEST") == "1"
+        if is_offline_test:
+            self.use_supabase = False
+            self.supabase = None
+            return
+
+        url = os.environ.get("SUPABASE_URL", "")
+        secret_key = os.environ.get("SUPABASE_SECRET_KEY", "")
+        if url and secret_key and create_client and not self.supabase:
+            try:
+                self.supabase = create_client(url, secret_key)
+                self.use_supabase = True
+            except Exception as e:
+                logger.warning(f"PlatformAdminManager reconnect failed: {e}")
+                self.use_supabase = False
+                self.supabase = None
 
     def verify_platform_admin(self, admin_user: AuthUser) -> None:
         """
@@ -123,30 +129,35 @@ class PlatformAdminManager:
             )
 
         self._ensure_connected()
-        if self.use_supabase and self.supabase:
-            try:
-                res = self.supabase.table("platform_admins").select("id, account_status").eq(
-                    "user_id", str(admin_user.user_id)
-                ).execute()
-                if not res.data or len(res.data) == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Access denied: Authoritative platform administrator record not found."
-                    )
-                status_val = (res.data[0].get("account_status") or "").strip().lower()
-                if status_val != "active":
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail=f"Access denied: Platform administrator account is {status_val}."
-                    )
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Error checking platform_admins: {e}")
+        if not self.use_supabase or not self.supabase:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Platform Administrator requires active database verification."
+            )
+
+        try:
+            res = self.supabase.table("platform_admins").select("id, account_status").eq(
+                "user_id", str(admin_user.user_id)
+            ).execute()
+            if not res.data or len(res.data) == 0:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Access denied: Database verification of platform administrator failed."
+                    detail="Access denied: No authoritative platform administrator record found."
                 )
+            status_val = (res.data[0].get("account_status") or "").strip().lower()
+            if status_val != "active":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Access denied: Platform administrator account is {status_val}."
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error checking platform_admins: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied: Database verification of platform administrator failed."
+            )
 
     def log_audit_event(
         self,
