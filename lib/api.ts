@@ -821,6 +821,9 @@ export interface PlatformAuditLogItem {
   created_at: string;
 }
 
+export const loginPlatformAdmin = (payload: { email: string; password?: string }) =>
+  api.post('/api/admin/auth/login', payload).then(r => r.data);
+
 export const getPlatformOverview = (): Promise<PlatformOverviewStats> =>
   api.get('/api/admin/overview').then(r => r.data);
 

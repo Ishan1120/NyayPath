@@ -2077,6 +2077,55 @@ def update_lawyer_availability_endpoint(payload: LawyerAvailabilityPayload, requ
 # Phase 7: Platform Administration & Global Oversight Endpoints
 # =============================================================================
 
+@app.post("/api/admin/auth/login")
+def platform_admin_login(payload: LoginRequest, request: Request):
+    """
+    Explicit, interactive authentication endpoint for Platform Administrators.
+    Validates credentials, strictly enforces UserRole.PLATFORM_ADMIN, verifies
+    live status in public.platform_admins, and issues an access token.
+    Enforces brute-force rate limiting.
+    """
+    clean_email = (payload.email or "").strip().lower()
+    email_key = f"admin_{clean_email or 'unknown'}"
+
+    enforce_rate_limit(request, action="admin_login", target_id=email_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+
+    if not clean_email or not payload.password:
+        record_rate_limit_failure(request, action="admin_login", target_id=email_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+        raise HTTPException(
+            status_code=400,
+            detail="Email and password are required for platform administrator authentication."
+        )
+
+    user = authenticate_officer(payload)
+    if not user or user.role != UserRole.PLATFORM_ADMIN:
+        record_rate_limit_failure(request, action="admin_login", target_id=email_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid platform administrator credentials or insufficient privileges."
+        )
+
+    try:
+        platform_admin_manager.verify_platform_admin(user)
+    except HTTPException as e:
+        record_rate_limit_failure(request, action="admin_login", target_id=email_key, max_attempts=5, window_seconds=900, cooldown_seconds=900)
+        raise e
+
+    reset_rate_limit(request, action="admin_login", target_id=email_key)
+    token = create_access_token(user)
+    return {
+        "status": "success",
+        "token": token,
+        "user": {
+            "user_id": user.user_id,
+            "role": user.role.value,
+            "institution_id": user.institution_id,
+            "name": user.name,
+            "email": user.email
+        }
+    }
+
+
 @app.get("/api/admin/overview")
 def get_admin_overview_endpoint(request: Request):
     """

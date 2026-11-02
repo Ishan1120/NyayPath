@@ -65,10 +65,10 @@ export default function DashboardPage() {
     };
   } | null>(null);
 
-  // Auth modal state for demo / signing in
+  // Auth modal state for signing in
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authEmail, setAuthEmail] = useState('student@nit.edu');
-  const [authPassword, setAuthPassword] = useState('ProctorPass@2026!');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
@@ -588,34 +588,36 @@ export default function DashboardPage() {
                 </div>
               )}
 
-              {/* Demo Quick Account Selectors */}
-              <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs space-y-1.5">
-                <span className="font-bold text-slate-700 block text-[11px] uppercase tracking-wider">
-                  Test Credentials (Click to prefill)
-                </span>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthEmail('student@nit.edu');
-                      setAuthPassword('ProctorPass@2026!');
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800 text-[11px] font-semibold hover:border-court-maroon"
-                  >
-                    Student (Aarav)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setAuthEmail('citizen@nyaypath.in');
-                      setAuthPassword('ProctorPass@2026!');
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800 text-[11px] font-semibold hover:border-court-maroon"
-                  >
-                    Citizen (Priya)
-                  </button>
+              {/* Development Account Identifier Helpers (Email Only - No Passwords Embedded) */}
+              {process.env.NODE_ENV !== 'production' && (
+                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-xs space-y-1.5">
+                  <span className="font-bold text-slate-700 block text-[11px] uppercase tracking-wider">
+                    Dev Quick Fill (Email Only)
+                  </span>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthEmail('student@nit.edu');
+                        setAuthPassword('');
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800 text-[11px] font-semibold hover:border-court-maroon"
+                    >
+                      Student (Aarav)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthEmail('citizen@nyaypath.in');
+                        setAuthPassword('');
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800 text-[11px] font-semibold hover:border-court-maroon"
+                    >
+                      Citizen (Priya)
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="flex items-center justify-end gap-2 pt-2">
                 <button

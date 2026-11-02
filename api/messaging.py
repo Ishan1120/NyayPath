@@ -13,9 +13,11 @@ Architecture & Capabilities:
 import os
 import re
 import uuid
+import time
+import random
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 from pydantic import BaseModel, Field, field_validator
 from fastapi import HTTPException, status
 
@@ -156,6 +158,66 @@ class CommunicationManager:
                 logger.warning(f"CommunicationManager reconnect failed: {e}")
                 self.use_supabase = False
                 self.supabase = None
+
+    def _execute_meeting_db_operation(
+        self,
+        operation_name: str,
+        operation_fn: Callable[[], Any],
+        max_retries: int = 3,
+        base_backoff: float = 0.05
+    ) -> Any:
+        """
+        Executes a database write operation on consultation_meetings with:
+        1. 23P01 (Exclusion constraint violation) identified as slot conflict, returning HTTP 409 Conflict.
+        2. 40P01 (Deadlock detected) retried safely with bounded backoff and jitter; HTTP 503 on exhaustion.
+        3. 40001 (Serialization failure) retried independently with bounded backoff; HTTP 503 on exhaustion.
+        4. Unexpected DB errors logged safely (without leaking raw SQL/internals), returning HTTP 500.
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                return operation_fn()
+            except HTTPException:
+                raise
+            except Exception as e:
+                err_str = str(e).lower()
+
+                # 1. Exclusion Constraint Violation (23P01) -> HTTP 409 Conflict
+                if any(k in err_str for k in ("23p01", "exclude_overlapping", "exclusion_violation")):
+                    logger.warning(f"Meeting slot conflict (23P01) detected during {operation_name}: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Time slot conflict: Selected meeting slot overlaps with an existing confirmed meeting."
+                    )
+
+                # 2. Deadlock detected (40P01)
+                is_deadlock = "40p01" in err_str or "deadlock detected" in err_str or "deadlock_detected" in err_str
+
+                # 3. Serialization failure (40001)
+                is_serialization_failure = "40001" in err_str or "could not serialize access" in err_str or "serialization_failure" in err_str
+
+                if is_deadlock or is_serialization_failure:
+                    conflict_type = "Deadlock (40P01)" if is_deadlock else "Serialization failure (40001)"
+                    if attempt < max_retries:
+                        backoff = (base_backoff * (2 ** (attempt - 1))) + random.uniform(0.01, 0.03)
+                        logger.warning(
+                            f"Transient {conflict_type} during {operation_name} (attempt {attempt}/{max_retries}). "
+                            f"Retrying in {backoff:.3f}s..."
+                        )
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        logger.error(f"Exhausted retries ({max_retries}) for {conflict_type} during {operation_name}.")
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=f"Database concurrency conflict: Temporary contention prevented completing the meeting {operation_name}. Please retry your request."
+                        )
+
+                # 4. Unexpected Database Exception -> Safe HTTP 500 without leaking raw SQL
+                logger.error(f"Unexpected database error during {operation_name}: {type(e).__name__}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to process meeting operation."
+                )
 
     def _verify_lawyer_case_access(
         self,
@@ -1041,7 +1103,7 @@ class CommunicationManager:
 
         if conflicts.data and len(conflicts.data) > 0:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=status.HTTP_409_CONFLICT,
                 detail="Time slot conflict: Advocate already has a confirmed meeting scheduled during this window."
             )
 
@@ -1068,17 +1130,10 @@ class CommunicationManager:
             "updated_at": now_iso
         }
 
-        try:
-            self.supabase.table("consultation_meetings").insert(meeting_record).execute()
-        except Exception as e:
-            err_str = str(e).lower()
-            if any(k in err_str for k in ("exclude", "23p01", "conflict", "deadlock", "40p01", "40001")):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Time slot conflict: Advocate already has a confirmed meeting scheduled during this window."
-                )
-            logger.error(f"Error scheduling meeting: {e}")
-            raise HTTPException(status_code=500, detail="Failed to schedule meeting.")
+        self._execute_meeting_db_operation(
+            "schedule",
+            lambda: self.supabase.table("consultation_meetings").insert(meeting_record).execute()
+        )
 
         # 7. Notify Recipient
         recipient_uid = lawyer_uid if not is_lawyer else citizen_uid
@@ -1145,7 +1200,7 @@ class CommunicationManager:
             ).gt("scheduled_end", meeting["scheduled_start"]).execute()
 
             if conflicts.data and len(conflicts.data) > 0:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cannot confirm: You have an overlapping confirmed meeting.")
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Cannot confirm: You have an overlapping confirmed meeting.")
 
             if payload.online_meeting_url:
                 update_dict["online_meeting_url"] = payload.online_meeting_url.strip()
@@ -1159,18 +1214,11 @@ class CommunicationManager:
                 update_dict["scheduled_start"] = payload.reschedule_start
                 update_dict["scheduled_end"] = payload.reschedule_end
 
-        try:
-            res = self.supabase.table("consultation_meetings").update(update_dict).eq("id", clean_id).execute()
-        except Exception as e:
-            err_str = str(e).lower()
-            if any(k in err_str for k in ("exclude", "23p01", "conflict", "deadlock", "40p01", "40001")):
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Cannot confirm: You have an overlapping confirmed meeting."
-                )
-            logger.error(f"Error updating meeting status: {e}")
-            raise HTTPException(status_code=500, detail="Failed to update meeting status.")
-        updated_meeting = res.data[0] if res.data else {**meeting, **update_dict}
+        res = self._execute_meeting_db_operation(
+            "status_update",
+            lambda: self.supabase.table("consultation_meetings").update(update_dict).eq("id", clean_id).execute()
+        )
+        updated_meeting = res.data[0] if (res and getattr(res, "data", None)) else {**meeting, **update_dict}
 
         # Notify the other party
         other_party_uid = citizen_uid if caller_uid == lawyer_uid else lawyer_uid

@@ -133,15 +133,20 @@ CREATE TABLE IF NOT EXISTS public.lawyer_availability (
 CREATE INDEX IF NOT EXISTS idx_lawyer_availability_user ON public.lawyer_availability(lawyer_user_id);
 
 -- 7. STORAGE BUCKET FOR MESSAGE ATTACHMENTS
-INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
-VALUES (
-    'message-attachments',
-    'message-attachments',
-    false,
-    10485760, -- 10MB
-    ARRAY['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
-)
-ON CONFLICT (id) DO NOTHING;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = 'storage') THEN
+        INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+        VALUES (
+            'message-attachments',
+            'message-attachments',
+            false,
+            10485760, -- 10MB
+            ARRAY['application/pdf', 'image/jpeg', 'image/png', 'image/webp']
+        )
+        ON CONFLICT (id) DO NOTHING;
+    END IF;
+END $$;
 
 -- 8. TRIGGER TO AUTO-UPDATE CONVERSATION PREVIEW ON NEW MESSAGE
 CREATE OR REPLACE FUNCTION private.trg_update_conversation_last_message()

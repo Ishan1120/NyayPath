@@ -47,8 +47,8 @@ export default function NotificationsPage() {
 
   // Unauthenticated fallback state
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authEmail, setAuthEmail] = useState('student@nit.edu');
-  const [authPassword, setAuthPassword] = useState('ProctorPass@2026!');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 

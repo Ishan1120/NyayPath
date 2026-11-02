@@ -481,7 +481,7 @@ class TestPhase8EndToEndIntegration(unittest.TestCase):
                 "agenda": "Conflicting meeting attempt."
             }
         )
-        self.assertEqual(r_overlap.status_code, 400, "Overlapping meeting must be rejected with HTTP 400")
+        self.assertEqual(r_overlap.status_code, 409, "Overlapping meeting must be rejected with HTTP 409 Conflict")
 
     # =========================================================================
     # JOURNEY STEP 10: CITIZEN REVOKES CASE ACCESS & VERIFIES FAIL-CLOSED STATE

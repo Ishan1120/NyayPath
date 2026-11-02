@@ -564,7 +564,7 @@ class TestPhase6Messaging(unittest.TestCase):
             headers={"Authorization": f"Bearer {TOKEN_CITIZEN_B}"},
             json=overlap_payload
         )
-        self.assertEqual(res_conflict.status_code, 400)
+        self.assertEqual(res_conflict.status_code, 409)
         self.assertIn("conflict", res_conflict.text.lower())
 
     # -----------------------------------------------------------------

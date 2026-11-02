@@ -429,13 +429,13 @@ class TestPhase61Corrections(unittest.TestCase):
         self.assertEqual(r1.status_code, 200)
         self.assertEqual(r1.json()["status"], "CONFIRMED")
 
-        # Attempt to confirm Meeting 2 -> Rejected with 400
+        # Attempt to confirm Meeting 2 -> Rejected with 409 Conflict
         r2 = client.patch(
             f"/api/meetings/{m2['id']}/status",
             headers={"Authorization": f"Bearer {TOKEN_LAWYER_A}"},
             json={"status": "CONFIRMED", "online_meeting_url": "https://meet.jit.si/nyaypath-room-2"}
         )
-        self.assertEqual(r2.status_code, 400)
+        self.assertEqual(r2.status_code, 409)
         self.assertIn("overlapping confirmed meeting", r2.text.lower())
 
         # Cleanup
@@ -651,8 +651,8 @@ class TestPhase61Corrections(unittest.TestCase):
         status_codes = [res_a.status_code, res_b.status_code]
         print(f"\n  [Concurrency Test] Status codes returned: {status_codes}")
 
-        # Verification: Exactly ONE must be 200, and exactly ONE must be 400
-        self.assertEqual(sorted(status_codes), [200, 400], f"Expected [200, 400], got {status_codes}")
+        # Verification: Exactly ONE must be 200, and exactly ONE must be 409
+        self.assertEqual(sorted(status_codes), [200, 409], f"Expected [200, 409], got {status_codes}")
 
         # Database Verification: Verify only 1 row in PostgreSQL is CONFIRMED
         db_rows = supabase_admin.table("consultation_meetings").select("id, status").in_(
