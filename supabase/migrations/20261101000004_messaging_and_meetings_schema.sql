@@ -196,18 +196,32 @@ GRANT ALL PRIVILEGES ON public.message_attachments TO service_role;
 GRANT ALL PRIVILEGES ON public.consultation_meetings TO service_role;
 GRANT ALL PRIVILEGES ON public.lawyer_availability TO service_role;
 
+-- Security Definer Participant Check (Eliminates RLS infinite recursion)
+CREATE OR REPLACE FUNCTION private.is_conversation_participant(_conv_id UUID, _user_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM public.conversation_participants
+        WHERE conversation_id = _conv_id
+          AND user_id = _user_id
+          AND participant_status = 'ACTIVE'
+    );
+$$;
+
+REVOKE ALL ON FUNCTION private.is_conversation_participant(UUID, UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.is_conversation_participant(UUID, UUID) TO authenticated, service_role;
+
 -- Policies for Conversations
 DROP POLICY IF EXISTS "Participants view conversations" ON public.conversations;
 CREATE POLICY "Participants view conversations"
 ON public.conversations FOR SELECT
 TO authenticated
 USING (
-    EXISTS (
-        SELECT 1 FROM public.conversation_participants cp
-        WHERE cp.conversation_id = conversations.id
-          AND cp.user_id = auth.uid()
-          AND cp.participant_status = 'ACTIVE'
-    )
+    private.is_conversation_participant(id, auth.uid())
     OR private.is_platform_admin(auth.uid())
 );
 
@@ -225,11 +239,8 @@ CREATE POLICY "Participants view conversation roster"
 ON public.conversation_participants FOR SELECT
 TO authenticated
 USING (
-    EXISTS (
-        SELECT 1 FROM public.conversation_participants cp
-        WHERE cp.conversation_id = conversation_participants.conversation_id
-          AND cp.user_id = auth.uid()
-    )
+    user_id = auth.uid()
+    OR private.is_conversation_participant(conversation_id, auth.uid())
     OR private.is_platform_admin(auth.uid())
 );
 
@@ -252,12 +263,7 @@ CREATE POLICY "Participants view messages"
 ON public.messages FOR SELECT
 TO authenticated
 USING (
-    EXISTS (
-        SELECT 1 FROM public.conversation_participants cp
-        WHERE cp.conversation_id = messages.conversation_id
-          AND cp.user_id = auth.uid()
-          AND cp.participant_status = 'ACTIVE'
-    )
+    private.is_conversation_participant(conversation_id, auth.uid())
     OR private.is_platform_admin(auth.uid())
 );
 
@@ -267,11 +273,9 @@ ON public.messages FOR INSERT
 TO authenticated
 WITH CHECK (
     sender_user_id = auth.uid()
-    AND EXISTS (
-        SELECT 1 FROM public.conversation_participants cp
-        WHERE cp.conversation_id = messages.conversation_id
-          AND cp.user_id = auth.uid()
-          AND cp.participant_status = 'ACTIVE'
+    AND (
+        private.is_conversation_participant(conversation_id, auth.uid())
+        OR private.is_platform_admin(auth.uid())
     )
 );
 
@@ -281,12 +285,7 @@ CREATE POLICY "Participants view attachments"
 ON public.message_attachments FOR SELECT
 TO authenticated
 USING (
-    EXISTS (
-        SELECT 1 FROM public.conversation_participants cp
-        WHERE cp.conversation_id = message_attachments.conversation_id
-          AND cp.user_id = auth.uid()
-          AND cp.participant_status = 'ACTIVE'
-    )
+    private.is_conversation_participant(conversation_id, auth.uid())
     OR private.is_platform_admin(auth.uid())
 );
 
@@ -296,11 +295,9 @@ ON public.message_attachments FOR INSERT
 TO authenticated
 WITH CHECK (
     uploaded_by = auth.uid()
-    AND EXISTS (
-        SELECT 1 FROM public.conversation_participants cp
-        WHERE cp.conversation_id = message_attachments.conversation_id
-          AND cp.user_id = auth.uid()
-          AND cp.participant_status = 'ACTIVE'
+    AND (
+        private.is_conversation_participant(conversation_id, auth.uid())
+        OR private.is_platform_admin(auth.uid())
     )
 );
 
