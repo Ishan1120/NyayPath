@@ -283,7 +283,16 @@ class DocumentAccessManager:
                 raise HTTPException(status_code=500, detail="Database verification failed for lawyer case access.")
 
         # 7. Citizen / Student Owner
-        if case.get("student_user_id") != user.user_id and case.get("user_id") != user.user_id:
+        cdata = case.get("data") if isinstance(case.get("data"), dict) else {}
+        owner_id = (
+            case.get("student_user_id") or
+            case.get("citizen_user_id") or
+            case.get("user_id") or
+            cdata.get("citizen_user_id") or
+            cdata.get("student_user_id") or
+            cdata.get("user_id")
+        )
+        if not owner_id or str(owner_id).lower() != str(user.user_id).lower():
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied: You do not have permission to access documents for this case."
