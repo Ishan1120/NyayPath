@@ -10,4 +10,8 @@ supabase>=2.3.0
 requests
 pypdf>=6.0.0
 pillow>=10.0.0
+PyJWT>=2.8.0
+cryptography>=42.0.0
+python-dateutil>=2.8.2
+
 

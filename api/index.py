@@ -106,6 +106,11 @@ try:
         LawyerVerificationProcessRequest,
         ExceptionalAccessRequest
     )
+    from .legal_drafts import (
+        legal_draft_manager,
+        CreateDraftRequest,
+        UpdateDraftRequest
+    )
 except ImportError:
     from precedent_pdf_generator import generate_precedent_case_brief_pdf
     from precedent_library import LANDMARK_PRECEDENTS
@@ -189,6 +194,11 @@ except ImportError:
         LawyerVerificationProcessRequest,
         ExceptionalAccessRequest
     )
+    from legal_drafts import (
+        legal_draft_manager,
+        CreateDraftRequest,
+        UpdateDraftRequest
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +223,18 @@ if _frontend_env and _frontend_env not in _CORS_ORIGINS and _frontend_env != "*"
 for _o in _env_origins:
     if _o != "*" and _o not in _CORS_ORIGINS:
         _CORS_ORIGINS.append(_o)
+
+_vercel_url = os.environ.get("VERCEL_URL", "").strip()
+if _vercel_url:
+    _v_origin = f"https://{_vercel_url}"
+    if _v_origin not in _CORS_ORIGINS:
+        _CORS_ORIGINS.append(_v_origin)
+
+_vercel_prod_url = os.environ.get("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
+if _vercel_prod_url:
+    _vp_origin = f"https://{_vercel_prod_url}"
+    if _vp_origin not in _CORS_ORIGINS:
+        _CORS_ORIGINS.append(_vp_origin)
 
 def _is_production() -> bool:
     env = os.environ.get("ENVIRONMENT", "").lower()
@@ -686,11 +708,23 @@ def get_watchdog_case(case_id: str):
         "watchdog_status": evaluated.get("watchdog_status", "ACTIVE"),
         "computed_status": evaluated.get("computed_status", "ACTIVE"),
         "filing_date": evaluated.get("filing_date"),
+        "has_statutory_deadline": evaluated.get("has_statutory_deadline", False),
+        "statutory_rule_name": evaluated.get("statutory_rule_name"),
+        "statutory_source": evaluated.get("statutory_source"),
+        "statutory_verification_date": evaluated.get("statutory_verification_date"),
+        "statutory_deadline_display": evaluated.get("statutory_deadline_display"),
+        "statutory_deadline_message": evaluated.get("statutory_deadline_message"),
+        "time_elapsed_since_submission_seconds": evaluated.get("time_elapsed_since_submission_seconds", 0),
+        "time_elapsed_since_submission_formatted": evaluated.get("time_elapsed_since_submission_formatted", ""),
+        "time_in_current_stage_seconds": evaluated.get("time_in_current_stage_seconds", 0),
+        "time_in_current_stage_formatted": evaluated.get("time_in_current_stage_formatted", ""),
+        "current_responsible_authority": evaluated.get("current_responsible_authority", ""),
+        "next_expected_action": evaluated.get("next_expected_action", ""),
         "response_due_date": evaluated.get("response_due_date"),
         "first_appeal_due_date": evaluated.get("first_appeal_due_date"),
         "response_received_at": evaluated.get("response_received_at") or evaluated.get("pio_response_date"),
         "is_overdue": evaluated.get("is_overdue", False),
-        "days_remaining": evaluated.get("days_remaining", 0),
+        "days_remaining": evaluated.get("days_remaining"),
         "days_overdue": evaluated.get("days_overdue", 0),
         "time_remaining_seconds": evaluated.get("time_remaining_seconds", 0),
         "section_20_penalty_inr": evaluated.get("section_20_penalty_inr", 0),
@@ -1546,6 +1580,79 @@ def get_lawyer_dashboard_stats_endpoint(request: Request):
     user = get_current_authenticated_user(request)
     stats = lawyer_connect_manager.get_lawyer_dashboard_stats(user)
     return {"status": "success", "stats": stats}
+
+
+# =====================================================================
+# Lawyer Workspace: Full Complaint Timeline & Grounded AI Assistant
+# =====================================================================
+
+@app.get("/api/lawyer/cases/{case_id}/timeline")
+def get_lawyer_case_timeline_endpoint(case_id: str, request: Request):
+    """
+    Retrieves the complete authorized chronological timeline for a shared case.
+    Strictly verifies active lawyer status and CASE_AND_DOCS or FULL consent scope.
+    """
+    user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.get_case_timeline_for_lawyer(user, case_id)
+
+
+@app.post("/api/lawyer/cases/{case_id}/ai-summary")
+def get_lawyer_case_ai_summary_endpoint(case_id: str, request: Request):
+    """
+    Produces an AI-assisted case intelligence summary grounded in verified timeline events.
+    """
+    user = get_current_authenticated_user(request)
+    return lawyer_connect_manager.generate_ai_case_summary(user, case_id)
+
+
+# =====================================================================
+# Legal Document Drafting & Persistent Storage Endpoints (Task 8)
+# =====================================================================
+
+@app.post("/api/drafts")
+def create_legal_draft_endpoint(payload: CreateDraftRequest, request: Request):
+    """
+    Persists a new user legal draft to the database. Strictly requires authentication.
+    """
+    user = get_current_authenticated_user(request)
+    return legal_draft_manager.create_draft(user, payload)
+
+
+@app.get("/api/drafts")
+def list_legal_drafts_endpoint(request: Request):
+    """
+    Retrieves all persistent legal drafts owned strictly by the authenticated user.
+    """
+    user = get_current_authenticated_user(request)
+    drafts = legal_draft_manager.list_user_drafts(user)
+    return {"drafts": drafts}
+
+
+@app.get("/api/drafts/{draft_id}")
+def get_legal_draft_endpoint(draft_id: str, request: Request):
+    """
+    Retrieves a single legal draft. Enforces strict ownership.
+    """
+    user = get_current_authenticated_user(request)
+    return legal_draft_manager.get_draft(user, draft_id)
+
+
+@app.put("/api/drafts/{draft_id}")
+def update_legal_draft_endpoint(draft_id: str, payload: UpdateDraftRequest, request: Request):
+    """
+    Updates an existing legal draft. Enforces ownership and optimistic concurrency versioning.
+    """
+    user = get_current_authenticated_user(request)
+    return legal_draft_manager.update_draft(user, draft_id, payload)
+
+
+@app.delete("/api/drafts/{draft_id}")
+def delete_legal_draft_endpoint(draft_id: str, request: Request):
+    """
+    Deletes a user-owned legal draft.
+    """
+    user = get_current_authenticated_user(request)
+    return legal_draft_manager.delete_draft(user, draft_id)
 
 
 @app.post("/api/intake/clarifying-questions")

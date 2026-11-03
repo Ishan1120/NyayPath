@@ -600,15 +600,28 @@ def synthesize_systematic_draft(
 
     statutory_act = template["statutory_act"]
 
-    # 1. Systematic Chronological Statement of Facts
+    # Check for missing critical facts to generate clear advisory warnings
+    missing_warnings = []
+    if ref_no == "[Official Reference on Record]":
+        missing_warnings.append("• Reference Number: Specify exact transaction ID, application/FIR number, or roll number before submission.")
+    if timeline == "Recent Period":
+        missing_warnings.append("• Exact Incident Date: Provide the precise calendar date/time when the default occurred.")
+    if not financial_loss and "financial" in template["domain_name"].lower():
+        missing_warnings.append("• Financial Quantum: Quantify exact disputed amount or monetary damages claimed.")
+
+    missing_warnings_block = ""
+    if missing_warnings:
+        missing_warnings_block = "\n\n[!] ADVISORY NOTICE — MISSING PREREQUISITE INFORMATION:\n" + "\n".join(missing_warnings)
+
+    # 1. Systematic Chronological Statement of Facts (User-Provided)
     facts_list = [
-        f"1. That the Applicant / Complainant is a bonafide citizen residing within {city} and has suffered significant legal injury / deficiency of service as detailed herein.",
+        f"1. That the Applicant / Complainant is a bonafide citizen residing within {city} and has suffered legal injury / deficiency of service as detailed herein.",
         f"2. That the present dispute pertains to {template['domain_name']} involving {authority}.",
-        f"3. Timeline & Occurrence: On or about {timeline}, the subject incident / statutory default occurred. Specifically: {problem_text.strip()}.",
-        f"4. Official Reference & Identification: The transaction / matter is identified by reference ID / work details: {ref_no}.",
+        f"3. Timeline & Occurrence: On or about {timeline}, the subject incident / statutory default occurred. Specifically (as stated by Complainant): \"{problem_text.strip()}\".",
+        f"4. Official Reference & Identification: The transaction / matter is identified by reference ID: {ref_no}.",
     ]
     if financial_loss:
-        facts_list.append(f"5. Financial Quantum: The aggrieved party suffered a wrongful monetary withholding / direct loss quantified at Rs. {financial_loss}.")
+        facts_list.append(f"5. Financial Loss: The aggrieved party suffered a wrongful monetary withholding / direct loss quantified at Rs. {financial_loss}.")
 
     facts_block = "\n\n".join(facts_list)
 
@@ -626,7 +639,7 @@ def synthesize_systematic_draft(
         title_header = f"FORMAL LEGAL NOTICE & STATUTORY GRIEVANCE PETITION UNDER CONSUMER PROTECTION ACT, 2019"
         prayers = [
             f"1. Immediate and unconditional provision of the demanded relief: {records_or_relief}.",
-            f"2. Full refund of Rs. {financial_loss or '[Specified Amount]'} along with 18% per annum commercial interest from the date of accrual of the default till actual payment.",
+            f"2. Full refund of Rs. {financial_loss or '[Specified Amount]'} along with commercial interest from the date of accrual of the default till actual payment.",
             f"3. Compensation of Rs. 50,000/- on account of mental agony, severe harassment, and unfair trade practice / administrative negligence.",
             f"4. Litigation costs of Rs. 10,000/- incurred in serving this formal notice and preparing documentation."
         ]
@@ -634,7 +647,7 @@ def synthesize_systematic_draft(
 
     prayers_block = "\n".join(prayers)
 
-    # 3. Assemble Full Systematic Draft
+    # 3. Assemble Full Systematic Draft with Clear Headings & User/AI Distinction
     draft_body = f"""{title_header}
 
 TO:
@@ -651,23 +664,23 @@ Address / Locality: {city}
 Contact: On Record / Cryptographic Token
 Citizenship: Citizen of India (Art. 19(1)(a) & Sec. 3 RTI Act 2005)
 
-II. SYSTEMATIC CHRONOLOGICAL STATEMENT OF FACTS:
+II. USER-SUBMITTED FACTS (VERIFIED CHRONOLOGICAL RECORD):
 {facts_block}
 
-III. STATUTORY GROUNDS & VIOLATIONS:
+III. STATUTORY GROUNDS & LEGAL PROVISIONS (SUGGESTED FRAMEWORK):
 (a) Violation of statutory service charter and administrative transparency obligations;
 (b) Arbitrary withholding of rights and records without authority of law (Article 14 & Article 21, Constitution of India);
 (c) Actionable under {statutory_act}.
 
-IV. SPECIFIC DEMANDS & RELIEF PRAYED FOR:
+IV. SPECIFIC DEMANDS & REQUESTED RELIEF:
 The Applicant / Complainant hereby formally demands:
-{prayers_block}
+{prayers_block}{missing_warnings_block}
 
 V. STATUTORY NOTICE & COMPLIANCE MANDATE:
 {statutory_warning}
 
 VI. VERIFICATION:
-I hereby verify that the facts stated hereinabove are true and correct to the best of my knowledge and belief, and no material fact has been concealed.
+I hereby verify that the facts stated in Section II hereinabove are true and correct to the best of my knowledge and belief, and no material fact has been concealed.
 
 Place: {city}
 Date: {timeline}

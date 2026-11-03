@@ -196,6 +196,8 @@ export const getCitizenCases = (params?: {
 export const getCitizenCaseDetails = (case_id: string) =>
   api.get(`/api/citizen/cases/${encodeURIComponent(case_id)}`).then(r => r.data)
 
+export const getCitizenCase = getCitizenCaseDetails;
+
 export const getCaseDocumentUrl = (case_id: string, document_id: string, verification_key?: string) => {
   const url = verification_key
     ? `/api/campus-proctor/document-url?case_id=${encodeURIComponent(case_id)}&document_id=${encodeURIComponent(document_id)}&verification_key=${encodeURIComponent(verification_key)}`
@@ -530,6 +532,8 @@ export const getVerifiedLawyers = (params?: {
   return api.get(`/api/lawyers${qs ? `?${qs}` : ''}`).then(r => r.data);
 };
 
+export const getLawyers = getVerifiedLawyers;
+
 export const getLawyerProfile = (lawyerId: string) =>
   api.get(`/api/lawyers/${encodeURIComponent(lawyerId)}`).then(r => r.data);
 
@@ -545,6 +549,8 @@ export const requestConsultation = (payload: {
   legal_issue: string;
   description: string;
   preferred_mode?: string;
+  draft_id?: string;
+  include_draft?: boolean;
 }) => api.post('/api/consultations/request', payload).then(r => r.data);
 
 export const getCitizenConsultations = () =>
@@ -572,6 +578,68 @@ export const revokeLawyerCaseAccess = (payload: {
 
 export const getLawyerSharedCases = () =>
   api.get('/api/lawyer/shared-cases').then(r => r.data);
+
+export const getLawyerCaseTimeline = (caseId: string) =>
+  api.get(`/api/lawyer/cases/${encodeURIComponent(caseId)}/timeline`).then(r => r.data);
+
+export const getLawyerCaseAiSummary = (caseId: string) =>
+  api.post(`/api/lawyer/cases/${encodeURIComponent(caseId)}/ai-summary`).then(r => r.data);
+
+// =====================================================================
+// Legal Document Drafts Persistence API
+// =====================================================================
+
+export interface LegalDraft {
+  id: string;
+  user_id: string;
+  case_id?: string;
+  title: string;
+  document_type: string;
+  facts?: string;
+  legal_provisions?: string;
+  requested_relief?: string;
+  draft_content: string;
+  lawyer_brief?: string;
+  status: 'DRAFT' | 'SAVED' | 'FINALIZED' | 'SHARED' | 'ARCHIVED';
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export const createLegalDraft = (payload: {
+  case_id?: string;
+  title?: string;
+  document_type?: string;
+  facts?: string;
+  legal_provisions?: string;
+  requested_relief?: string;
+  draft_content: string;
+  lawyer_brief?: string;
+}): Promise<LegalDraft> => api.post('/api/drafts', payload).then(r => r.data);
+
+export const listLegalDrafts = (): Promise<{ drafts: LegalDraft[] }> =>
+  api.get('/api/drafts').then(r => r.data);
+
+export const getLegalDraft = (draftId: string): Promise<LegalDraft> =>
+  api.get(`/api/drafts/${encodeURIComponent(draftId)}`).then(r => r.data);
+
+export const updateLegalDraft = (
+  draftId: string,
+  payload: {
+    title?: string;
+    draft_content?: string;
+    facts?: string;
+    legal_provisions?: string;
+    requested_relief?: string;
+    lawyer_brief?: string;
+    status?: string;
+    expected_version?: number;
+  }
+): Promise<LegalDraft> =>
+  api.put(`/api/drafts/${encodeURIComponent(draftId)}`, payload).then(r => r.data);
+
+export const deleteLegalDraft = (draftId: string): Promise<{ status: string; message: string }> =>
+  api.delete(`/api/drafts/${encodeURIComponent(draftId)}`).then(r => r.data);
 
 export const getLawyerDashboardStats = () =>
   api.get('/api/lawyer/dashboard-stats').then(r => r.data);

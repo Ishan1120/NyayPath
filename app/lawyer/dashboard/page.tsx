@@ -741,11 +741,11 @@ export default function LawyerDashboardPage() {
 
                         <div className="shrink-0 flex items-center gap-2">
                           <Link
-                            href={`/dashboard/my-cases?case_id=${encodeURIComponent(c.case_id)}`}
+                            href={`/lawyer/cases/${encodeURIComponent(c.case_id)}`}
                             className="px-4 py-2 bg-court-maroon hover:bg-rose-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all shadow-sm flex items-center gap-1.5"
                           >
                             <FileText size={13} />
-                            <span>View Case Dossier</span>
+                            <span>View Case Dossier & Timeline</span>
                           </Link>
                         </div>
                       </div>

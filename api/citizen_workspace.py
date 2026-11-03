@@ -782,18 +782,72 @@ class CitizenWorkspaceManager:
                 detail="Invalid verification key or unauthorized access. Case tracking requires ownership or valid verification code."
             )
 
-        # Public tracking projection (Zero PII, zero proctor notes)
+        # Public tracking projection (Rich sanitized tracking info, zero PII, zero proctor notes)
         timeline = self._build_case_timeline(case)
+        curr_dt = datetime.now(timezone.utc)
+
+        # Elapsed time since submission
+        created_at_str = case.get("created_at") or case.get("filing_date")
+        elapsed_sec = 0
+        elapsed_formatted = "0h elapsed"
+        if created_at_str:
+            try:
+                c_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                elapsed_sec = max(0, int((curr_dt - c_dt).total_seconds()))
+                e_days = elapsed_sec // 86400
+                e_hrs = (elapsed_sec % 86400) // 3600
+                elapsed_formatted = f"{e_days}d {e_hrs}h elapsed" if e_days > 0 else f"{e_hrs}h elapsed"
+            except Exception:
+                pass
+
+        # Time in current stage
+        updated_at_str = case.get("updated_at") or created_at_str
+        stage_sec = 0
+        stage_formatted = "0h in stage"
+        if updated_at_str:
+            try:
+                u_dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+                stage_sec = max(0, int((curr_dt - u_dt).total_seconds()))
+                s_days = stage_sec // 86400
+                s_hrs = (stage_sec % 86400) // 3600
+                stage_formatted = f"{s_days}d {s_hrs}h in stage" if s_days > 0 else f"{s_hrs}h in stage"
+            except Exception:
+                pass
+
+        curr_status = (case.get("status") or "SUBMITTED").upper()
+        if curr_status in ("SUBMITTED", "PENDING", "FILED"):
+            next_step = "Administrative scrutiny and committee assignment"
+        elif curr_status in ("HEARING_SCHEDULED", "UNDER_INQUIRY"):
+            next_step = f"Committee inquiry and hearing proceedings on {case.get('hearing_date') or 'scheduled date'}"
+        elif curr_status in ("RESOLVED", "CLOSED"):
+            next_step = "Case concluded; formal implementation of decision"
+        else:
+            next_step = "Processing by dealing authority"
+
+        is_owner = bool(user and user.user_id and str(user.user_id).lower() == str(owner_id).lower())
+
         public_summary = {
             "case_id": case.get("case_id"),
             "case_type": case.get("case_type") or "CAMPUS_GRIEVANCE",
             "category": case.get("category") or "General",
-            "department": case.get("department"),
-            "status": (case.get("status") or "SUBMITTED").upper(),
+            "department": case.get("department") or "Proctorial Board / Redressal Office",
+            "status": curr_status,
+            "submission_timestamp": created_at_str,
+            "last_update_timestamp": updated_at_str,
+            "time_elapsed_since_submission_seconds": elapsed_sec,
+            "time_elapsed_since_submission_formatted": elapsed_formatted,
+            "time_in_current_stage_seconds": stage_sec,
+            "time_in_current_stage_formatted": stage_formatted,
+            "latest_action_taken": case.get("action_taken") or (timeline[-1]["title"] if timeline else "Case registered"),
+            "next_expected_step": next_step,
+            "statutory_deadline_info": "No verified statutory deadline configured for this case.",
             "hearing_date": case.get("hearing_date"),
             "action_taken": case.get("action_taken"),
             "created_at": case.get("created_at"),
-            "updated_at": case.get("updated_at")
+            "updated_at": case.get("updated_at"),
+            "is_owner_authenticated": is_owner,
+            "requires_owner_auth_for_full_details": True,
+            "owner_auth_endpoint": f"/api/citizen/cases/{clean_id}"
         }
 
         return {
@@ -1103,7 +1157,7 @@ class CitizenWorkspaceManager:
                     flattened["tracking_key_hash"] = row.get("tracking_key_hash")
                     flattened["data"] = cdata
                     return flattened
-                return None
+                # Not found in database tables; fall through to memory fallback
             except Exception as e:
                 logger.error(f"Error querying single case from Supabase: {e}")
                 if _is_production():

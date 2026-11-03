@@ -1,73 +1,38 @@
 'use client';
 
-import React, { useState, useEffect, Suspense, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { motion, AnimatePresence } from 'framer-motion';
 import {
-  getCase,
-  getWatchdogState,
-  startWatchdog,
-  recordWatchdogResponse,
-  simulateWatchdog
-} from '@/lib/api';
-import {
-  ArrowLeft,
-  Search,
   Clock,
-  Scale,
-  FileText,
-  ShieldCheck,
   AlertTriangle,
   CheckCircle2,
+  FileText,
+  Scale,
+  RefreshCw,
+  Search,
+  ArrowRight,
+  Sparkles,
+  Send,
+  History,
+  AlertCircle,
   Copy,
   Check,
-  Send,
-  Sparkles,
-  ChevronDown,
-  ChevronUp,
-  History,
-  Info,
-  Calendar,
-  AlertCircle,
-  ArrowRight,
-  RefreshCw,
-  Sliders,
-  ExternalLink
+  ArrowLeft,
+  ShieldCheck,
+  ShieldAlert,
+  Lock,
+  Eye,
+  X,
+  Building2,
+  Calendar
 } from 'lucide-react';
-
-interface WatchdogEvent {
-  type: string;
-  timestamp: string;
-  metadata?: Record<string, any>;
-}
-
-interface CaseMetrics {
-  case_id: string;
-  watchdog_enabled?: boolean;
-  watchdog_status?: string;
-  computed_status: string;
-  is_overdue: boolean;
-  days_overdue: number;
-  days_remaining: number;
-  section_20_penalty_inr: number;
-  filing_date: string;
-  response_due_date: string;
-  first_appeal_due_date: string;
-  time_remaining_seconds: number;
-  appeal_eligible?: boolean;
-  last_watchdog_check_at?: string;
-  last_watchdog_event?: string;
-  watchdog_events?: WatchdogEvent[];
-  response_received_at?: string;
-  pio_response_text?: string;
-  exemption_cited?: string;
-  legal_counter?: string;
-  precedent_title?: string;
-  first_appeal_draft?: string;
-  department_info?: Record<string, any>;
-  user_problem?: string;
-}
+import {
+  getWatchdogState,
+  recordWatchdogResponse,
+  simulateWatchdog,
+  getCitizenCase
+} from '@/lib/api';
 
 function formatCountdown(totalSeconds: number) {
   if (totalSeconds <= 0) {
@@ -76,52 +41,108 @@ function formatCountdown(totalSeconds: number) {
   const days = Math.floor(totalSeconds / 86400);
   const hours = Math.floor((totalSeconds % 86400) / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = Math.floor(totalSeconds % 60);
+  const seconds = totalSeconds % 60;
   return { days, hours, minutes, seconds };
 }
 
-function TrackPageContent() {
-  const searchParams = useSearchParams();
-  const router = useRouter();
-  const caseIdParam = searchParams.get('case_id') || '';
+interface WatchdogEvent {
+  type: string;
+  timestamp: string;
+  metadata?: any;
+}
 
-  const [inputCaseId, setInputCaseId] = useState(caseIdParam);
-  const [caseData, setCaseData] = useState<CaseMetrics | null>(null);
+interface CaseWatchdogData {
+  case_id: string;
+  category?: string;
+  case_type?: string;
+  has_statutory_deadline?: boolean;
+  statutory_rule_name?: string;
+  statutory_source?: string;
+  statutory_verification_date?: string;
+  statutory_deadline_display?: string;
+  statutory_deadline_message?: string;
+  time_elapsed_since_submission_seconds?: number;
+  time_elapsed_since_submission_formatted?: string;
+  time_in_current_stage_seconds?: number;
+  time_in_current_stage_formatted?: string;
+  current_responsible_authority?: string;
+  next_expected_action?: string;
+  watchdog_enabled?: boolean;
+  watchdog_status?: string;
+  computed_status?: string;
+  filing_date?: string;
+  response_due_date?: string;
+  first_appeal_due_date?: string;
+  response_received_at?: string;
+  is_overdue?: boolean;
+  days_remaining?: number;
+  days_overdue?: number;
+  time_remaining_seconds?: number;
+  section_20_penalty_inr?: number;
+  appeal_eligible?: boolean;
+  last_watchdog_check_at?: string;
+  last_watchdog_event?: string;
+  watchdog_events?: WatchdogEvent[];
+  notification_state?: any;
+  pio_response_text?: string;
+  exemption_cited?: string;
+  legal_counter?: string;
+  precedent_title?: string;
+  third_party_notice_due_date?: string;
+  third_party_notice_source?: string;
+  third_party_representation_source?: string;
+  third_party_decision_source?: string;
+  fee_exclusion_applied?: boolean;
+  fee_exclusion_days?: number;
+  first_appeal_draft?: string;
+  department_info?: any;
+  form_data?: any;
+  user_problem?: string;
+  data?: any;
+}
+
+function TrackPageContent() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const caseIdParam = searchParams.get('case_id');
+
+  const [inputCaseId, setInputCaseId] = useState(caseIdParam || '');
+  const [caseData, setCaseData] = useState<CaseWatchdogData | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Live ticking countdown state
+  // Live ticking countdown state for statutory RTI matters
   const [secondsRemaining, setSecondsRemaining] = useState<number>(0);
 
-  // PIO Response Tab / Form
-  const [showResponseForm, setShowResponseForm] = useState(false);
+  // PIO Response & Counter State
   const [pioInputText, setPioInputText] = useState('');
   const [responseDate, setResponseDate] = useState(new Date().toISOString().split('T')[0]);
   const [analyzing, setAnalyzing] = useState(false);
-
-  // Copy state
+  const [simulating, setSimulating] = useState(false);
   const [copiedPasskey, setCopiedPasskey] = useState(false);
 
-  // Dev simulation state
-  const [showDevTools, setShowDevTools] = useState(false);
-  const [simulating, setSimulating] = useState(false);
+  // Owner Full Complaint Details Modal
+  const [isOwnerModalOpen, setIsOwnerModalOpen] = useState(false);
+  const [loadingOwnerDossier, setLoadingOwnerDossier] = useState(false);
+  const [ownerDossier, setOwnerDossier] = useState<any>(null);
+  const [ownerAuthError, setOwnerAuthError] = useState<string | null>(null);
 
   const fetchCaseDetails = async (id: string) => {
-    if (!id.trim()) return;
+    const cleanId = id.trim().toUpperCase();
+    if (!cleanId) return;
+
     setLoading(true);
     setError(null);
     try {
-      const cleanId = id.trim().toUpperCase();
       const data = await getWatchdogState(cleanId);
-      if (!data || !data.case_id) throw new Error('Case not found');
       setCaseData(data);
-      setSecondsRemaining(data.time_remaining_seconds || 0);
-      if (data.pio_response_text) {
-        setPioInputText(data.pio_response_text);
+      if (data.has_statutory_deadline && data.time_remaining_seconds !== undefined) {
+        setSecondsRemaining(data.time_remaining_seconds);
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch case details');
+      console.error('Watchdog query error:', err);
       setCaseData(null);
+      setError(err?.response?.data?.detail || err?.message || 'Case ID not found or error loading progress.');
     } finally {
       setLoading(false);
     }
@@ -134,20 +155,27 @@ function TrackPageContent() {
     }
   }, [caseIdParam]);
 
-  // Live authoritative countdown timer
+  // Live countdown timer for cases with statutory deadlines
   useEffect(() => {
-    if (secondsRemaining <= 0) return;
+    if (!caseData?.has_statutory_deadline || secondsRemaining <= 0) return;
     const interval = setInterval(() => {
-      setSecondsRemaining((prev) => Math.max(0, prev - 1));
+      setSecondsRemaining((prev) => {
+        if (prev <= 1) {
+          clearInterval(interval);
+          if (caseData?.case_id) fetchCaseDetails(caseData.case_id);
+          return 0;
+        }
+        return prev - 1;
+      });
     }, 1000);
     return () => clearInterval(interval);
-  }, [secondsRemaining]);
+  }, [caseData?.has_statutory_deadline, secondsRemaining]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (inputCaseId.trim()) {
-      router.push(`/track?case_id=${inputCaseId.trim().toUpperCase()}`);
-    }
+    if (!inputCaseId.trim()) return;
+    router.push(`/track?case_id=${encodeURIComponent(inputCaseId.trim().toUpperCase())}`);
+    fetchCaseDetails(inputCaseId);
   };
 
   const handleCopyPasskey = () => {
@@ -163,15 +191,15 @@ function TrackPageContent() {
 
     setAnalyzing(true);
     try {
-      const res = await recordWatchdogResponse(
+      await recordWatchdogResponse(
         caseData.case_id,
-        pioInputText,
-        responseDate ? new Date(responseDate).toISOString() : new Date().toISOString()
+        pioInputText.trim() || '',
+        responseDate ? `${responseDate}T12:00:00Z` : undefined
       );
       await fetchCaseDetails(caseData.case_id);
-      setShowResponseForm(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to record PIO response:', err);
+      alert(err?.response?.data?.detail || 'Failed to analyze response.');
     } finally {
       setAnalyzing(false);
     }
@@ -190,61 +218,28 @@ function TrackPageContent() {
     }
   };
 
+  // Open Full Complaint Details with Owner Authentication check
+  const handleOpenOwnerDossier = async () => {
+    if (!caseData?.case_id) return;
+    setIsOwnerModalOpen(true);
+    setLoadingOwnerDossier(true);
+    setOwnerAuthError(null);
+    setOwnerDossier(null);
+
+    try {
+      const res = await getCitizenCase(caseData.case_id);
+      setOwnerDossier(res.case || res);
+    } catch (err: any) {
+      console.error('Owner authentication failed for full dossier:', err);
+      setOwnerAuthError(
+        'Owner Authentication Required: Possession of a tracking key grants access to sanitized progress only. Full complaint text, sensitive statements, and attached documents are protected and require logging in as the verified case owner.'
+      );
+    } finally {
+      setLoadingOwnerDossier(false);
+    }
+  };
+
   const countdown = useMemo(() => formatCountdown(secondsRemaining), [secondsRemaining]);
-
-  // Calculate timeline milestone active indexes
-  const timelineStages = useMemo(() => {
-    const status = caseData?.watchdog_status || 'ACTIVE';
-    const isOverdue = caseData?.is_overdue || false;
-    const daysRemaining = caseData?.days_remaining ?? 30;
-    const hasResponse = status === 'RESPONSE_RECEIVED' || !!caseData?.response_received_at;
-    const appealReady = !!caseData?.first_appeal_draft || status === 'DEEMED_REFUSAL';
-
-    return [
-      {
-        id: 1,
-        title: 'RTI Filed',
-        date: caseData?.filing_date ? new Date(caseData.filing_date).toLocaleDateString() : 'Filed',
-        completed: true,
-        current: false,
-      },
-      {
-        id: 2,
-        title: 'Watchdog Active',
-        date: '24/7 Monitoring',
-        completed: true,
-        current: status === 'ACTIVE' && daysRemaining > 7,
-      },
-      {
-        id: 3,
-        title: '7 Days Remaining',
-        date: 'Warning Window',
-        completed: daysRemaining <= 7 || isOverdue || hasResponse,
-        current: status === 'DUE_SOON' && daysRemaining <= 7 && daysRemaining > 0,
-      },
-      {
-        id: 4,
-        title: 'Statutory Limit (30d)',
-        date: caseData?.response_due_date ? new Date(caseData.response_due_date).toLocaleDateString() : 'Day 30',
-        completed: isOverdue || hasResponse,
-        current: status === 'DUE_TODAY',
-      },
-      {
-        id: 5,
-        title: hasResponse ? 'Response Received' : 'Deemed Refusal',
-        date: hasResponse ? 'Reply Logged' : 'Sec 7(2) Triggered',
-        completed: isOverdue || hasResponse,
-        current: status === 'DEEMED_REFUSAL' || status === 'OVERDUE' || (hasResponse && !appealReady),
-      },
-      {
-        id: 6,
-        title: 'First Appeal Eligible',
-        date: 'Section 19(1)',
-        completed: appealReady || isOverdue,
-        current: appealReady,
-      }
-    ];
-  }, [caseData]);
 
   return (
     <div 
@@ -267,14 +262,14 @@ function TrackPageContent() {
               <div className="flex items-center gap-2">
                 <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse hidden sm:inline-block" />
                 <span className="text-xs font-mono font-bold uppercase tracking-widest text-emerald-300 bg-emerald-950/80 px-2.5 py-0.5 rounded-full border border-emerald-500/30">
-                  STATUTORY RTI SLA ENGINE
+                  STATUTORY SLA & CASE PROGRESS ENGINE
                 </span>
               </div>
               <h1 className="text-2xl md:text-3xl font-black tracking-tight text-white flex items-center gap-3 drop-shadow-md mt-1">
-                NyayPath Legal Watchdog
+                NyayPath Case Tracker
               </h1>
               <p className="text-blue-100 text-xs sm:text-sm font-medium drop-shadow-sm">
-                Deterministic statutory timeline enforcer & Section 20 penalty engine
+                Verified statutory timelines, stage duration metrics, and sanitized complaint monitoring
               </p>
             </div>
           </div>
@@ -282,7 +277,7 @@ function TrackPageContent() {
           <form onSubmit={handleSearchSubmit} className="flex gap-2 w-full md:w-auto pl-12 sm:pl-0">
             <input
               type="text"
-              placeholder="Enter Case ID (CR-XXXX-XXXX)"
+              placeholder="Enter Case ID or Passkey"
               value={inputCaseId}
               onChange={(e) => setInputCaseId(e.target.value.toUpperCase())}
               className="bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-sm text-ashoka-navy font-bold focus:outline-none focus:border-[#FF9933] focus:ring-1 focus:ring-[#FF9933] w-full sm:w-60 uppercase tracking-widest shadow-sm placeholder:text-slate-400 placeholder:font-medium placeholder:tracking-normal placeholder:normal-case"
@@ -300,7 +295,7 @@ function TrackPageContent() {
         {error && (
           <div className="bg-red-50 border border-red-200 text-red-800 p-4 rounded-2xl text-sm font-medium shadow-sm backdrop-blur-sm flex items-center gap-3">
             <AlertCircle size={20} className="text-red-600 shrink-0" />
-            <span>⚠️ {error}. Please verify your Case ID / Passkey and try again.</span>
+            <span>⚠️ {error}</span>
           </div>
         )}
 
@@ -311,10 +306,10 @@ function TrackPageContent() {
               <Search className="w-10 h-10 text-slate-400" />
             </div>
             <h2 className="text-2xl sm:text-3xl font-extrabold text-white mb-3 tracking-tight drop-shadow-md">
-              Track Your RTI Case Down
+              Track Your Legal Matter & SLA Compliance
             </h2>
             <p className="text-slate-200 max-w-lg mb-12 font-medium leading-relaxed text-sm sm:text-base drop-shadow-sm">
-              Enter your 12-character Case ID above to check your statutory 30-day timeline, view accrued Section 20 penalties, and generate court-ready First Appeals.
+              Enter your Case Reference ID or Tracking Key above to inspect your verified case progress, track elapsed time and stage durations, and view statutory SLA milestones where legally applicable.
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-5xl w-full text-left">
@@ -322,424 +317,472 @@ function TrackPageContent() {
                 <div className="w-12 h-12 bg-amber-50 rounded-2xl flex items-center justify-center mb-5 border border-amber-200">
                   <Clock className="w-6 h-6 text-amber-600" />
                 </div>
-                <h3 className="font-extrabold text-ashoka-navy mb-2 text-base tracking-tight">30-Day Statutory Limit</h3>
+                <h3 className="font-extrabold text-ashoka-navy mb-2 text-base tracking-tight">Verified Statutory Timelines</h3>
                 <p className="text-sm text-slate-600 leading-relaxed font-medium">
-                  Under Section 7(1) of the RTI Act, 2005, the Public Information Officer (PIO) is legally mandated to provide the requested information within 30 calendar days.
-                </p>
-              </div>
-              
-              <div className="bg-white/95 backdrop-blur-md border border-slate-300 p-6 sm:p-8 rounded-3xl shadow-xl">
-                <div className="w-12 h-12 bg-rose-50 rounded-2xl flex items-center justify-center mb-5 border border-rose-200">
-                  <Scale className="w-6 h-6 text-court-maroon" />
-                </div>
-                <h3 className="font-extrabold text-ashoka-navy mb-2 text-base tracking-tight">Section 20 Penalty Engine</h3>
-                <p className="text-sm text-slate-600 leading-relaxed font-medium">
-                  Unreasonable delays attract a personal statutory penalty on the PIO of ₹250 per day (up to ₹25,000). Our engine deterministically monitors this legal liability.
+                  NyayPath enforces real statutory rules (e.g. Section 7(1) of the RTI Act, 2005) only when backed by authoritative law. For unconfigured matters, no arbitrary universal deadline is assumed.
                 </p>
               </div>
               
               <div className="bg-white/95 backdrop-blur-md border border-slate-300 p-6 sm:p-8 rounded-3xl shadow-xl">
                 <div className="w-12 h-12 bg-emerald-50 rounded-2xl flex items-center justify-center mb-5 border border-emerald-200">
-                  <FileText className="w-6 h-6 text-emerald-600" />
+                  <Building2 className="w-6 h-6 text-emerald-600" />
                 </div>
-                <h3 className="font-extrabold text-ashoka-navy mb-2 text-base tracking-tight">Automatic First Appeal</h3>
+                <h3 className="font-extrabold text-ashoka-navy mb-2 text-base tracking-tight">Stage Duration & Elapsed Time</h3>
                 <p className="text-sm text-slate-600 leading-relaxed font-medium">
-                  If the statutory deadline expires without a reply, or if an unlawful exemption is cited, NyayPath prepares a court-ready First Appeal under Section 19(1).
+                  Deterministically measures elapsed time since filing and active duration in the current inquiry stage, clearly identifying the responsible public authority and next steps.
+                </p>
+              </div>
+              
+              <div className="bg-white/95 backdrop-blur-md border border-slate-300 p-6 sm:p-8 rounded-3xl shadow-xl">
+                <div className="w-12 h-12 bg-rose-50 rounded-2xl flex items-center justify-center mb-5 border border-rose-200">
+                  <Lock className="w-6 h-6 text-court-maroon" />
+                </div>
+                <h3 className="font-extrabold text-ashoka-navy mb-2 text-base tracking-tight">Owner-Guarded Full Details</h3>
+                <p className="text-sm text-slate-600 leading-relaxed font-medium">
+                  Public tracking keys display sanitized status metrics without PII. Complete complaint text, citizen statements, and evidence documents require verified owner authentication.
                 </p>
               </div>
             </div>
           </div>
         )}
 
-        {/* AUTHORITATIVE WATCHDOG DASHBOARD VIEW */}
+        {/* ACTIVE CASE TRACKING DASHBOARD */}
         {caseData && (
           <div className="space-y-8 animate-in fade-in zoom-in-95 duration-300">
             
-            {/* 1. TOP WATCHDOG HERO & PASSKEY BANNER */}
+            {/* 1. TOP HERO BANNER */}
             <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 sm:p-8 shadow-xl text-ashoka-navy">
               <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-slate-200">
                 
                 <div className="space-y-2">
-                  <div className="flex items-center gap-3">
-                    <span className="flex h-3 w-3 relative">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                      <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-600"></span>
-                    </span>
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-mono font-bold uppercase tracking-widest text-emerald-800 bg-emerald-100 px-3 py-1 rounded-full border border-emerald-300">
-                      🛡️ CASE WATCHDOG ACTIVE
+                      STATUS: {caseData.watchdog_status?.replace(/_/g, ' ') || 'ACTIVE'}
+                    </span>
+                    <span className="text-xs font-bold uppercase px-2.5 py-1 rounded-full bg-slate-100 text-slate-700">
+                      CATEGORY: {caseData.category || caseData.case_type || 'LEGAL COMPLAINT'}
                     </span>
                   </div>
+
                   <h2 className="text-2xl sm:text-3xl font-black text-ashoka-navy tracking-tight">
-                    NyayPath is automatically monitoring your RTI deadline.
+                    Case Reference #{caseData.case_id}
                   </h2>
                   <p className="text-xs sm:text-sm text-slate-600 font-medium max-w-2xl">
-                    Every filed RTI is attached to a statutory state engine. Zero accounts required — save your Passkey to check status or appeal anytime.
+                    Filed: {caseData.filing_date ? new Date(caseData.filing_date).toLocaleDateString() : 'Recorded on File'} | Last Activity: {caseData.last_watchdog_event?.replace(/_/g, ' ') || 'Registered'}
                   </p>
                 </div>
 
-                {/* PASSKEY BOX */}
+                {/* PASSKEY & VIEW FULL COMPLAINT BUTTON */}
                 <div className="bg-[#F8FAFC] border border-slate-300 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row lg:flex-col items-start sm:items-center lg:items-start justify-between gap-3 shrink-0 shadow-inner">
                   <div>
                     <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-500">
-                      YOUR CASE PASSKEY
+                      TRACKING IDENTIFIER
                     </span>
                     <div className="text-xl font-mono font-black text-ashoka-navy tracking-widest mt-0.5">
                       {caseData.case_id}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleCopyPasskey}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-bold text-xs shadow-sm transition cursor-pointer"
-                  >
-                    {copiedPasskey ? (
-                      <>
-                        <Check size={14} className="text-emerald-600" />
-                        <span className="text-emerald-700">Copied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy size={14} />
-                        <span>Copy Passkey</span>
-                      </>
-                    )}
-                  </button>
+
+                  <div className="flex items-center gap-2 w-full">
+                    <button
+                      type="button"
+                      onClick={handleCopyPasskey}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-bold text-xs shadow-sm transition cursor-pointer"
+                    >
+                      {copiedPasskey ? <Check size={13} className="text-emerald-600" /> : <Copy size={13} />}
+                      <span>{copiedPasskey ? 'Copied' : 'Copy'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleOpenOwnerDossier}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-court-maroon hover:bg-rose-700 text-white font-bold text-xs shadow-sm transition cursor-pointer"
+                      title="Inspect complete complaint text, submitted details, and documents (Owner Login Required)"
+                    >
+                      <Lock size={13} />
+                      <span>View Full Details</span>
+                    </button>
+                  </div>
                 </div>
               </div>
 
-              {/* 2. LIVE COUNTDOWN & STATUS BANNER */}
-              <div className="pt-6 grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
-                
-                {/* Countdown Section */}
-                <div className="lg:col-span-6 bg-slate-900 text-white rounded-2xl p-5 sm:p-6 shadow-md">
-                  <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-400">
-                    {caseData.is_overdue ? 'STATUTORY PERIOD EXPIRED' : 'PIO RESPONSE COUNTDOWN'}
-                  </span>
-                  
-                  {caseData.is_overdue ? (
-                    <div className="mt-2 text-court-maroon font-black text-2xl sm:text-3xl tracking-tight text-rose-400">
-                      OVERDUE BY {caseData.days_overdue} DAY(S)
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-4 gap-2 mt-2 text-center">
-                      <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700">
-                        <div className="text-2xl sm:text-3xl font-mono font-black text-amber-400">
-                          {String(countdown.days).padStart(2, '0')}
+              {/* 2. STATUTORY DEADLINE STATUS SECTION */}
+              <div className="pt-6">
+                {caseData.has_statutory_deadline ? (
+                  // Statutory RTI window exists
+                  <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+                    <div className="lg:col-span-6 bg-slate-900 text-white rounded-2xl p-5 sm:p-6 shadow-md">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-amber-400">
+                          {caseData.statutory_rule_name}
+                        </span>
+                        <span className="text-[10px] font-mono text-slate-400">
+                          Verified: {caseData.statutory_verification_date}
+                        </span>
+                      </div>
+
+                      {caseData.is_overdue ? (
+                        <div className="mt-2 text-rose-400 font-black text-2xl sm:text-3xl tracking-tight">
+                          OVERDUE BY {caseData.days_overdue} DAY(S)
                         </div>
-                        <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Days</div>
-                      </div>
-                      <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700">
-                        <div className="text-2xl sm:text-3xl font-mono font-black text-white">
-                          {String(countdown.hours).padStart(2, '0')}
-                        </div>
-                        <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Hours</div>
-                      </div>
-                      <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700">
-                        <div className="text-2xl sm:text-3xl font-mono font-black text-white">
-                          {String(countdown.minutes).padStart(2, '0')}
-                        </div>
-                        <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Mins</div>
-                      </div>
-                      <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700">
-                        <div className="text-2xl sm:text-3xl font-mono font-black text-emerald-400">
-                          {String(countdown.seconds).padStart(2, '0')}
-                        </div>
-                        <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Secs</div>
-                      </div>
-                    </div>
-                  )}
-
-                  <p className="text-[11px] text-slate-400 mt-3 font-medium">
-                    Statutory deadline: {caseData.response_due_date ? new Date(caseData.response_due_date).toLocaleDateString() : 'N/A'} (Section 7(1))
-                  </p>
-                </div>
-
-                {/* Risk / Legal State Message */}
-                <div className="lg:col-span-6 space-y-3">
-                  {caseData.watchdog_status === 'DEEMED_REFUSAL' || caseData.is_overdue ? (
-                    <div className="bg-rose-50 border border-rose-200 p-5 rounded-2xl text-court-maroon space-y-2">
-                      <div className="flex items-center gap-2 font-bold text-sm">
-                        <AlertTriangle size={18} className="text-court-maroon shrink-0" />
-                        <span>Statutory Response Window Expired (Deemed Refusal)</span>
-                      </div>
-                      <p className="text-xs text-slate-700 leading-relaxed font-medium">
-                        Under <strong>Section 7(2)</strong> of the RTI Act, failure to respond within 30 days is legally treated as a deemed refusal. You are now entitled to file a <strong>Section 19(1) First Appeal</strong> immediately.
-                      </p>
-                    </div>
-                  ) : caseData.watchdog_status === 'RESPONSE_RECEIVED' ? (
-                    <div className="bg-sky-50 border border-sky-200 p-5 rounded-2xl text-sky-900 space-y-2">
-                      <div className="flex items-center gap-2 font-bold text-sm">
-                        <CheckCircle2 size={18} className="text-sky-600 shrink-0" />
-                        <span>Public Authority Response Recorded</span>
-                      </div>
-                      <p className="text-xs text-sky-800 leading-relaxed font-medium">
-                        A response has been logged for this case. The statutory clock is halted. If the response was partial, evasive, or denied information, you can generate a First Appeal below.
-                      </p>
-                    </div>
-                  ) : caseData.days_remaining <= 7 ? (
-                    <div className="bg-amber-50 border border-amber-200 p-5 rounded-2xl text-amber-900 space-y-2">
-                      <div className="flex items-center gap-2 font-bold text-sm">
-                        <Clock size={18} className="text-amber-600 shrink-0" />
-                        <span>Statutory Deadline Approaching ({caseData.days_remaining} Days Left)</span>
-                      </div>
-                      <p className="text-xs text-amber-800 leading-relaxed font-medium">
-                        Your RTI is in the final week of its statutory window. If the PIO does not dispatch information by {new Date(caseData.response_due_date).toLocaleDateString()}, NyayPath will automatically prepare your First Appeal.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="bg-emerald-50 border border-emerald-200 p-5 rounded-2xl text-emerald-900 space-y-2">
-                      <div className="flex items-center gap-2 font-bold text-sm">
-                        <ShieldCheck size={18} className="text-emerald-600 shrink-0" />
-                        <span>PIO Response Window Active</span>
-                      </div>
-                      <p className="text-xs text-emerald-800 leading-relaxed font-medium">
-                        Your RTI application is within the normal statutory period. The concerned Public Information Officer is legally obligated to reply by {new Date(caseData.response_due_date).toLocaleDateString()}.
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-              </div>
-            </div>
-
-            {/* 3. METRIC CARDS */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              
-              <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 sm:p-8 shadow-xl space-y-2 text-ashoka-navy">
-                <span className="text-xs font-bold uppercase text-slate-500 tracking-wider font-sans">
-                  Current Case Status
-                </span>
-                <div className="text-2xl font-black text-emerald-600 tracking-tight">
-                  {caseData.watchdog_status?.replace(/_/g, ' ') || 'ACTIVE'}
-                </div>
-                <p className="text-xs text-slate-500 font-medium">
-                  Filed on: {caseData.filing_date ? new Date(caseData.filing_date).toLocaleDateString() : 'N/A'}
-                </p>
-              </div>
-
-              <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 sm:p-8 shadow-xl space-y-2 text-ashoka-navy">
-                <span className="text-xs font-bold uppercase text-slate-500 tracking-wider font-sans">
-                  30-Day SLA Milestone
-                </span>
-                <div className="text-2xl font-black tracking-tight">
-                  {caseData.is_overdue ? (
-                    <span className="text-court-maroon">Overdue by {caseData.days_overdue} Day(s)</span>
-                  ) : (
-                    <span className="text-amber-600">
-                      {caseData.days_remaining} Days Remaining
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-slate-500 font-medium">
-                  Due: {caseData.response_due_date ? new Date(caseData.response_due_date).toLocaleDateString() : 'N/A'}
-                </p>
-              </div>
-
-              <div
-                className={`border rounded-3xl p-6 sm:p-8 space-y-2 shadow-xl transition-colors backdrop-blur-md ${
-                  (caseData.section_20_penalty_inr || 0) > 0
-                    ? 'bg-rose-50/95 border-rose-200 text-court-maroon'
-                    : 'bg-white/95 border-slate-300 text-ashoka-navy'
-                }`}
-              >
-                <span className="text-xs font-bold uppercase tracking-wider flex items-center justify-between">
-                  <span>Section 20 Penalty Accrued</span>
-                  <span className="text-[10px] bg-court-maroon text-white px-2.5 py-0.5 rounded-full font-sans tracking-tight font-bold">
-                    ₹250 / Day
-                  </span>
-                </span>
-                <div className={`text-3xl font-black tracking-tight ${(caseData.section_20_penalty_inr || 0) > 0 ? 'text-court-maroon' : 'text-ashoka-navy'}`}>
-                  ₹{(caseData.section_20_penalty_inr || 0).toLocaleString('en-IN')}
-                </div>
-                <p className="text-[11px] text-slate-500 font-medium leading-relaxed">
-                  Potential statutory exposure calculated under Sec 20(1) (Capped at ₹25,000). Formal penalty subject to Information Commission proceedings.
-                </p>
-              </div>
-            </div>
-
-            {/* 4. VISUAL PROGRESS TIMELINE */}
-            <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 sm:p-8 shadow-xl text-ashoka-navy space-y-6">
-              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2 border-b border-slate-200 pb-4">
-                <div>
-                  <h3 className="text-lg font-black text-ashoka-navy tracking-tight flex items-center gap-2">
-                    <History size={20} className="text-[#FF9933]" />
-                    Statutory Progress Timeline
-                  </h3>
-                  <p className="text-xs text-slate-500 font-medium mt-0.5">
-                    Live timeline based on deterministic server-side calculations under the RTI Act, 2005.
-                  </p>
-                </div>
-              </div>
-
-              {/* Step indicator pipeline */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 pt-2">
-                {timelineStages.map((stage) => (
-                  <div
-                    key={stage.id}
-                    className={`p-4 rounded-2xl border transition-all flex flex-col justify-between ${
-                      stage.current
-                        ? 'bg-amber-50/90 border-amber-300 shadow-md ring-2 ring-amber-400/40'
-                        : stage.completed
-                        ? 'bg-emerald-50/80 border-emerald-200'
-                        : 'bg-[#F8FAFC] border-slate-200 opacity-60'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[10px] font-mono font-bold text-slate-400">
-                        STEP {stage.id}
-                      </span>
-                      {stage.completed && !stage.current ? (
-                        <CheckCircle2 size={16} className="text-emerald-600" />
-                      ) : stage.current ? (
-                        <span className="h-2.5 w-2.5 rounded-full bg-amber-500 animate-ping" />
                       ) : (
-                        <div className="h-3 w-3 rounded-full border border-slate-300" />
+                        <div className="grid grid-cols-4 gap-2 mt-2 text-center">
+                          <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700">
+                            <div className="text-2xl sm:text-3xl font-mono font-black text-amber-400">
+                              {String(countdown.days).padStart(2, '0')}
+                            </div>
+                            <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Days</div>
+                          </div>
+                          <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700">
+                            <div className="text-2xl sm:text-3xl font-mono font-black text-white">
+                              {String(countdown.hours).padStart(2, '0')}
+                            </div>
+                            <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Hours</div>
+                          </div>
+                          <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700">
+                            <div className="text-2xl sm:text-3xl font-mono font-black text-white">
+                              {String(countdown.minutes).padStart(2, '0')}
+                            </div>
+                            <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Mins</div>
+                          </div>
+                          <div className="bg-slate-800/80 p-2.5 rounded-xl border border-slate-700">
+                            <div className="text-2xl sm:text-3xl font-mono font-black text-emerald-400">
+                              {String(countdown.seconds).padStart(2, '0')}
+                            </div>
+                            <div className="text-[9px] uppercase font-bold text-slate-400 tracking-wider">Secs</div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="mt-3 pt-3 border-t border-slate-800 text-[11px] text-slate-400 space-y-1.5">
+                        <p className="font-medium text-slate-300">
+                          Statutory Authority: <span className="text-amber-300">{caseData.statutory_source}</span>
+                        </p>
+                        {caseData.third_party_notice_due_date && (
+                          <div className="p-2.5 rounded-xl bg-slate-800/80 border border-slate-700 space-y-1 text-[10px] text-slate-300">
+                            <p className="text-amber-400 font-bold uppercase tracking-wider">Statutory Third-Party Process (Section 11):</p>
+                            <p>• <strong>Section 11(1):</strong> Written notice to third party within 5 days of request receipt.</p>
+                            <p>• <strong>Section 11(2):</strong> 10-day representation window allowed to third party.</p>
+                            <p>• <strong>Section 11(3):</strong> PIO decision on disclosure within 40 days of request.</p>
+                          </div>
+                        )}
+                        {caseData.fee_exclusion_applied && (
+                          <p className="text-blue-300 text-[10px]">
+                            • <strong>Section 7(3)(a) Proviso:</strong> {caseData.fee_exclusion_days} day(s) fee payment period excluded from countdown.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="lg:col-span-6 space-y-3">
+                      {caseData.is_overdue ? (
+                        <div className="bg-rose-50 border border-rose-200 p-5 rounded-2xl text-court-maroon space-y-2">
+                          <div className="flex items-center gap-2 font-bold text-sm">
+                            <AlertTriangle size={18} className="text-court-maroon shrink-0" />
+                            <span>Statutory Response Window Expired (Deemed Refusal)</span>
+                          </div>
+                          <p className="text-xs text-slate-700 leading-relaxed font-medium">
+                            Under <strong>Section 7(2)</strong> of the RTI Act, failure to respond within 30 days is legally treated as a deemed refusal. You are now entitled to file a <strong>Section 19(1) First Appeal</strong>.
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="bg-emerald-50 border border-emerald-200 p-5 rounded-2xl text-emerald-900 space-y-2">
+                          <div className="flex items-center gap-2 font-bold text-sm">
+                            <ShieldCheck size={18} className="text-emerald-600 shrink-0" />
+                            <span>Mandatory Statutory Window Active</span>
+                          </div>
+                          <p className="text-xs text-emerald-800 leading-relaxed font-medium">
+                            The concerned Public Information Officer is legally obligated to provide certified records by {caseData.response_due_date ? new Date(caseData.response_due_date).toLocaleDateString() : 'N/A'}.
+                          </p>
+                        </div>
                       )}
                     </div>
-                    <div>
-                      <div className="text-xs font-black text-ashoka-navy tracking-tight">
-                        {stage.title}
-                      </div>
-                      <div className="text-[11px] text-slate-500 font-medium mt-1">
-                        {stage.date}
-                      </div>
-                    </div>
                   </div>
-                ))}
+                ) : (
+                  // No verified statutory deadline configured
+                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-200 text-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 font-bold text-sm text-slate-900">
+                        <Calendar size={18} className="text-court-maroon shrink-0" />
+                        <span>No verified statutory deadline configured for this case.</span>
+                      </div>
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        NyayPath does not fabricate deadlines. This matter is handled under administrative grievance procedures without a universal 30-day statutory expiry.
+                      </p>
+                    </div>
+                    <span className="text-[11px] font-mono font-bold px-3 py-1 rounded-full bg-slate-200 text-slate-700 shrink-0">
+                      Standard Administrative Flow
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* 5. "I RECEIVED A RESPONSE" & PIO ANALYSIS SUITE */}
-            <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 sm:p-8 shadow-xl text-ashoka-navy space-y-6">
-              <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 border-b border-slate-200 pb-5">
-                <div>
-                  <h3 className="text-xl font-extrabold text-ashoka-navy tracking-tight flex items-center gap-2">
-                    <Send size={20} className="text-court-maroon" />
-                    Public Information Officer (PIO) Response Suite
-                  </h3>
-                  <p className="text-xs sm:text-sm text-slate-600 font-medium mt-1">
-                    Did you receive a reply letter or email from the authority? Log it here for automatic legal analysis.
-                  </p>
+            {/* 3. METRIC CARDS (Timing, Authority, Next Step) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+              
+              <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 shadow-xl space-y-2 text-ashoka-navy">
+                <span className="text-xs font-bold uppercase text-slate-500 tracking-wider font-sans">
+                  Time Elapsed Since Filing
+                </span>
+                <div className="text-2xl font-black text-ashoka-navy tracking-tight">
+                  {caseData.time_elapsed_since_submission_formatted || '0d elapsed'}
                 </div>
+                <p className="text-xs text-slate-500 font-medium">
+                  Continuous tracker from submission
+                </p>
+              </div>
 
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPioInputText('');
-                      handleRecordResponse();
-                    }}
-                    disabled={analyzing}
-                    className="bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 font-bold text-xs px-4 py-2.5 rounded-xl transition cursor-pointer shadow-sm tracking-tight"
-                  >
-                    ⚡ Flag Deemed Refusal (No Reply)
-                  </button>
+              <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 shadow-xl space-y-2 text-ashoka-navy">
+                <span className="text-xs font-bold uppercase text-slate-500 tracking-wider font-sans">
+                  Time in Current Stage
+                </span>
+                <div className="text-2xl font-black text-amber-600 tracking-tight">
+                  {caseData.time_in_current_stage_formatted || '0d in stage'}
+                </div>
+                <p className="text-xs text-slate-500 font-medium">
+                  Active duration at current status
+                </p>
+              </div>
+
+              <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 shadow-xl space-y-2 text-ashoka-navy">
+                <span className="text-xs font-bold uppercase text-slate-500 tracking-wider font-sans">
+                  Responsible Authority
+                </span>
+                <div className="text-sm font-bold text-slate-900 tracking-tight line-clamp-2">
+                  {caseData.current_responsible_authority || 'Competent Authority'}
+                </div>
+                <p className="text-xs text-slate-500 font-medium">
+                  Dealing administrative office
+                </p>
+              </div>
+
+              <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 shadow-xl space-y-2 text-ashoka-navy">
+                <span className="text-xs font-bold uppercase text-slate-500 tracking-wider font-sans">
+                  Next Expected Step
+                </span>
+                <div className="text-sm font-bold text-emerald-700 tracking-tight line-clamp-2">
+                  {caseData.next_expected_action || 'Administrative Review'}
+                </div>
+                <p className="text-xs text-slate-500 font-medium">
+                  Expected procedural milestone
+                </p>
+              </div>
+            </div>
+
+            {/* 4. CHRONOLOGICAL EVENT TIMELINE */}
+            <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 sm:p-8 shadow-xl text-ashoka-navy space-y-6">
+              <div className="flex items-center justify-between border-b border-slate-200 pb-4">
+                <div>
+                  <h3 className="text-lg font-black text-ashoka-navy tracking-tight flex items-center gap-2">
+                    <History size={20} className="text-court-maroon" />
+                    <span>Case Milestone & Activity Chronology</span>
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium mt-0.5">
+                    User-visible audit log showing verified filing dates, status updates, and milestone events.
+                  </p>
                 </div>
               </div>
 
-              <form onSubmit={handleRecordResponse} className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div className="sm:col-span-1">
-                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5 font-sans">
-                      Date Response Received
-                    </label>
-                    <input
-                      type="date"
-                      value={responseDate}
-                      onChange={(e) => setResponseDate(e.target.value)}
-                      className="w-full bg-[#F8FAFC] border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs text-ashoka-navy font-bold focus:outline-none focus:border-[#FF9933]"
-                    />
+              {caseData.watchdog_events && caseData.watchdog_events.length > 0 ? (
+                <div className="relative pl-6 space-y-4 before:absolute before:left-2 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-200">
+                  {caseData.watchdog_events.map((ev, i) => (
+                    <div key={i} className="relative">
+                      <div className="absolute -left-[21px] top-1.5 w-2.5 h-2.5 rounded-full bg-court-maroon ring-4 ring-white" />
+                      <div className="p-3 bg-[#F8FAFC] rounded-xl border border-slate-200 text-xs">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="font-bold text-slate-900">{ev.type.replace(/_/g, ' ')}</span>
+                          <span className="text-[10px] font-mono text-slate-400">
+                            {ev.timestamp ? new Date(ev.timestamp).toLocaleString() : 'Recorded'}
+                          </span>
+                        </div>
+                        {ev.metadata && Object.keys(ev.metadata).length > 0 && (
+                          <div className="text-[11px] text-slate-600 font-mono">
+                            {JSON.stringify(ev.metadata)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-500 text-center">
+                  Case filed on {caseData.filing_date ? new Date(caseData.filing_date).toLocaleDateString() : 'Record'}. Subsequent milestones will appear here as proceedings advance.
+                </div>
+              )}
+            </div>
+
+            {/* 5. FIRST APPEAL & RESPONSE SUITE (If RTI matter) */}
+            {caseData.has_statutory_deadline && (
+              <div className="bg-white/95 backdrop-blur-md border border-slate-300 rounded-3xl p-6 sm:p-8 shadow-xl text-ashoka-navy space-y-6">
+                <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-4 border-b border-slate-200 pb-5">
+                  <div>
+                    <h3 className="text-xl font-extrabold text-ashoka-navy tracking-tight flex items-center gap-2">
+                      <Send size={20} className="text-court-maroon" />
+                      Public Information Officer (PIO) Response Suite
+                    </h3>
+                    <p className="text-xs sm:text-sm text-slate-600 font-medium mt-1">
+                      Did you receive a reply letter or email from the authority? Log it here for automatic legal analysis.
+                    </p>
                   </div>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5 font-sans">
-                    Paste PIO Reply Letter / Email Text
-                  </label>
-                  <textarea
-                    rows={4}
-                    value={pioInputText}
-                    onChange={(e) => setPioInputText(e.target.value)}
-                    placeholder="Paste the official response text received from the PIO here (e.g. exemptions cited, refusal justifications, or partial information)..."
-                    className="w-full bg-[#F8FAFC] border border-slate-300 rounded-2xl p-4 text-xs sm:text-sm text-ashoka-navy font-medium focus:outline-none focus:border-[#FF9933] resize-none leading-relaxed placeholder-slate-400"
-                  />
-                </div>
-
-                <div className="flex justify-end">
-                  <button
-                    type="submit"
-                    disabled={analyzing || !pioInputText.trim()}
-                    className="py-3 px-6 cursor-pointer bg-gradient-to-r from-court-maroon via-rose-700 to-court-maroon hover:from-rose-700 hover:to-rose-800 transition-colors text-white flex items-center gap-2 shadow-md rounded-xl font-bold text-xs sm:text-sm disabled:opacity-50 tracking-tight"
-                  >
-                    {analyzing ? (
-                      <>
-                        <RefreshCw className="animate-spin" size={16} /> Analyzing with Legal AI...
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles size={16} /> 🔍 Log & Analyze PIO Reply
-                      </>
-                    )}
-                  </button>
-                </div>
-              </form>
-
-              {/* Analysis Result & Counter Preview */}
-              {caseData.exemption_cited && (
-                <div className="mt-6 bg-[#F8FAFC] border border-slate-200 rounded-3xl p-6 sm:p-8 space-y-5 shadow-inner">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4">
-                    <span className="text-xs uppercase text-slate-500 font-bold tracking-wider font-sans">
-                      Detected Exemption Clause
-                    </span>
-                    <span className="bg-court-maroon/10 text-court-maroon border border-court-maroon/20 px-4 py-1.5 rounded-full text-xs font-bold shadow-sm font-sans tracking-tight">
-                      Section {caseData.exemption_cited}
-                    </span>
+                <form onSubmit={handleRecordResponse} className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div className="sm:col-span-1">
+                      <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5 font-sans">
+                        Date Response Received
+                      </label>
+                      <input
+                        type="date"
+                        value={responseDate}
+                        onChange={(e) => setResponseDate(e.target.value)}
+                        className="w-full bg-[#F8FAFC] border border-slate-300 rounded-xl px-3.5 py-2.5 text-xs text-ashoka-navy font-bold focus:outline-none focus:border-[#FF9933]"
+                      />
+                    </div>
                   </div>
 
                   <div>
-                    <h4 className="text-base font-extrabold text-ashoka-navy mb-2 tracking-tight">
-                      {caseData.precedent_title || 'Legal Counter-Precedent'}
-                    </h4>
-                    <p className="text-xs sm:text-sm text-slate-700 bg-white border border-slate-300 p-5 rounded-2xl leading-relaxed font-medium shadow-sm">
-                      {caseData.legal_counter || 'Information cannot be denied blanketly without establishing public harm.'}
-                    </p>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1.5 font-sans">
+                      Paste PIO Reply Letter / Email Text
+                    </label>
+                    <textarea
+                      rows={4}
+                      value={pioInputText}
+                      onChange={(e) => setPioInputText(e.target.value)}
+                      placeholder="Paste the official response text received from the PIO here..."
+                      className="w-full bg-[#F8FAFC] border border-slate-300 rounded-2xl p-4 text-xs sm:text-sm text-ashoka-navy font-medium focus:outline-none focus:border-[#FF9933] resize-none leading-relaxed placeholder-slate-400"
+                    />
                   </div>
 
-                  <div className="pt-2 flex justify-end">
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={analyzing || !pioInputText.trim()}
+                      className="py-3 px-6 cursor-pointer bg-gradient-to-r from-court-maroon via-rose-700 to-court-maroon hover:from-rose-700 hover:to-rose-800 transition-colors text-white flex items-center gap-2 shadow-md rounded-xl font-bold text-xs sm:text-sm disabled:opacity-50 tracking-tight"
+                    >
+                      {analyzing ? <RefreshCw className="animate-spin" size={16} /> : <Sparkles size={16} />}
+                      <span>Log & Analyze PIO Reply</span>
+                    </button>
+                  </div>
+                </form>
+
+                {/* First Appeal Button if overdue */}
+                {(caseData.watchdog_status === 'DEEMED_REFUSAL' || caseData.is_overdue) && (
+                  <div className="mt-6 bg-rose-50 border border-rose-200 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                      <h4 className="text-sm font-extrabold text-court-maroon">
+                        First Appeal Available (Statutory Deadline Expired)
+                      </h4>
+                      <p className="text-xs text-slate-600 mt-0.5 font-medium">
+                        Since the 30-day statutory window expired with no recorded reply, you are entitled to file a First Appeal before the Appellate Authority under Section 19(1).
+                      </p>
+                    </div>
                     <Link
                       href={`/rti/appeal?case_id=${caseData.case_id}&mode=appeal`}
-                      className="bg-ashoka-navy hover:bg-slate-800 border border-slate-700 text-white font-bold text-xs sm:text-sm px-6 py-3.5 rounded-xl transition shadow-md flex items-center gap-2 tracking-tight"
+                      className="bg-court-maroon hover:bg-rose-700 text-white font-bold text-xs px-5 py-3 rounded-xl transition shadow-md shrink-0 flex items-center gap-2 tracking-tight"
                     >
-                      <FileText size={16} className="text-[#FF9933]" />
-                      <span>Generate Court-Ready First Appeal (Sec 19(1))</span>
-                      <ArrowRight size={16} />
+                      <span>Draft First Appeal</span>
+                      <ArrowRight size={14} />
+                    </Link>
+                  </div>
+                )}
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* ============================================================= */}
+        {/* MODAL: OWNER FULL COMPLAINT DETAILS DOSSIER                   */}
+        {/* ============================================================= */}
+        {isOwnerModalOpen && (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-white text-slate-900 rounded-3xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 max-h-[90vh] overflow-y-auto space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <Lock size={18} className="text-court-maroon" />
+                  <h3 className="font-bold text-base text-slate-900">
+                    Full Case Dossier (Owner Protected)
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsOwnerModalOpen(false)}
+                  className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {loadingOwnerDossier ? (
+                <div className="py-12 text-center text-xs text-slate-500">
+                  <RefreshCw size={20} className="animate-spin mx-auto mb-2 text-court-maroon" />
+                  Verifying authenticated case owner credentials...
+                </div>
+              ) : ownerAuthError ? (
+                <div className="p-5 bg-amber-50 border border-amber-200 rounded-2xl text-amber-950 space-y-3 text-xs leading-relaxed">
+                  <div className="flex items-center gap-2 font-bold text-sm text-amber-900">
+                    <ShieldAlert size={18} className="text-amber-700" />
+                    <span>Owner Login Required</span>
+                  </div>
+                  <p>{ownerAuthError}</p>
+                  <div className="pt-2 flex justify-end">
+                    <Link
+                      href={`/dashboard?return_to=${encodeURIComponent(`/track?case_id=${caseData?.case_id}`)}`}
+                      className="px-4 py-2 bg-court-maroon hover:bg-rose-700 text-white rounded-xl font-bold text-xs shadow-sm transition"
+                    >
+                      Log In to Access Full Complaint
                     </Link>
                   </div>
                 </div>
-              )}
-
-              {/* Appeal Callout if Deemed Refusal */}
-              {(caseData.watchdog_status === 'DEEMED_REFUSAL' || caseData.is_overdue) && !caseData.exemption_cited && (
-                <div className="mt-6 bg-rose-50 border border-rose-200 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div>
-                    <h4 className="text-sm font-extrabold text-court-maroon">
-                      First Appeal Available (Zero-Response / Deemed Refusal)
-                    </h4>
-                    <p className="text-xs text-slate-600 mt-0.5 font-medium">
-                      Since the 30-day statutory window expired with no recorded reply, you are entitled to file a First Appeal before the Appellate Authority under Section 19(1).
+              ) : ownerDossier ? (
+                <div className="space-y-4 text-xs">
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900 text-sm">
+                        {ownerDossier.title || `Matter #${ownerDossier.case_id}`}
+                      </span>
+                      <span className="font-mono text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-bold">
+                        {ownerDossier.status}
+                      </span>
+                    </div>
+                    <p className="text-slate-700 leading-relaxed font-sans">
+                      {ownerDossier.problem_text || ownerDossier.description || ownerDossier.details?.description || 'Full statement on record.'}
                     </p>
                   </div>
-                  <Link
-                    href={`/rti/appeal?case_id=${caseData.case_id}&mode=appeal`}
-                    className="bg-gradient-to-r from-court-maroon via-rose-700 to-court-maroon hover:from-rose-700 hover:to-rose-800 text-white font-bold text-xs px-5 py-3 rounded-xl transition shadow-md shrink-0 flex items-center gap-2 tracking-tight"
-                  >
-                    <span>Draft First Appeal</span>
-                    <ArrowRight size={14} />
-                  </Link>
-                </div>
-              )}
-            </div>
 
+                  {ownerDossier.documents && ownerDossier.documents.length > 0 && (
+                    <div>
+                      <h4 className="font-bold text-slate-800 mb-2">Attached Documents:</h4>
+                      <div className="space-y-1.5">
+                        {ownerDossier.documents.map((doc: any, idx: number) => (
+                          <div key={idx} className="p-2.5 bg-white border border-slate-200 rounded-xl flex items-center justify-between">
+                            <span className="font-mono text-slate-700">{doc.file_name || `Document #${idx + 1}`}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">{doc.mime_type}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="p-3 bg-emerald-50 rounded-xl text-emerald-900 text-[11px] flex items-center gap-2">
+                    <ShieldCheck size={14} className="text-emerald-600" />
+                    <span>Authenticated ownership confirmed. Full confidential dossier unlocked.</span>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className="pt-2 flex justify-end border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsOwnerModalOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
           </div>
         )}
 
@@ -754,7 +797,7 @@ export default function TrackPage() {
       fallback={
         <div className="min-h-screen flex flex-col items-center justify-center p-6 text-sm font-bold text-white tracking-wide bg-cover bg-center" style={{ backgroundImage: "url('/bg.image.png')" }}>
           <div className="w-8 h-8 border-4 border-white border-t-transparent rounded-full animate-spin mb-4" />
-          Loading NyayPath Watchdog...
+          Loading NyayPath Case Tracker...
         </div>
       }
     >

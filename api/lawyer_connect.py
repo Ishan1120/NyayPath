@@ -76,6 +76,10 @@ class ConsultationCreateRequest(BaseModel):
     legal_issue: str
     description: str
     preferred_mode: str = "ONLINE"  # ONLINE, IN_PERSON, PHONE
+    draft_id: Optional[str] = None
+    include_draft: Optional[bool] = False
+    consent_to_share: Optional[bool] = False
+    consent_text: Optional[str] = None
 
 
 class ConsultationStatusUpdateRequest(BaseModel):
@@ -435,14 +439,63 @@ class LawyerConnectManager:
                     )
                 case_uuid = c_rec.get("id")
 
+        # Prevent duplicate pending consultation requests on repeated clicks
+        try:
+            dup_query = self.supabase.table("consultation_requests").select("id").eq("citizen_user_id", str(citizen_user.user_id)).eq("lawyer_user_id", str(payload.lawyer_user_id)).eq("status", "PENDING")
+            if payload.case_id:
+                dup_query = dup_query.eq("case_id", payload.case_id.strip().upper())
+            dup_res = dup_query.execute()
+            if dup_res.data and len(dup_res.data) > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="A pending consultation request already exists for this advocate and matter."
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.warning(f"Duplicate consultation check encountered error: {e}")
+
+        # Verify draft ownership if draft is explicitly attached
+        draft_id = None
+        if payload.include_draft and payload.draft_id:
+            try:
+                draft_res = self.supabase.table("legal_drafts").select("id, user_id").eq("id", payload.draft_id.strip()).execute()
+                if draft_res.data and len(draft_res.data) > 0:
+                    d_row = draft_res.data[0]
+                    if str(d_row.get("user_id")).lower() != str(citizen_user.user_id).lower():
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Access denied: You can only share legal drafts owned by your account."
+                        )
+                    draft_id = str(d_row["id"])
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.warning(f"Draft verification encountered error: {e}")
+
         now_iso = datetime.now(timezone.utc).isoformat()
         req_id = str(uuid.uuid4())
+        statutory_consent = (
+            "I explicitly consent to sharing this selected legal draft and the associated information "
+            "with the chosen lawyer for the purpose of my consultation request. "
+            "Access is limited to the selected sharing scope and may be revoked."
+        )
+        consent_record_text = None
+        consent_record_timestamp = None
+        if payload.include_draft and draft_id:
+            consent_record_text = payload.consent_text or statutory_consent
+            consent_record_timestamp = now_iso
+
         req_record = {
             "id": req_id,
             "citizen_user_id": str(citizen_user.user_id),
             "lawyer_user_id": str(payload.lawyer_user_id),
             "case_id": payload.case_id.strip().upper() if payload.case_id else None,
             "case_uuid": case_uuid,
+            "draft_id": draft_id,
+            "include_draft": bool(payload.include_draft and draft_id),
+            "consent_text": consent_record_text,
+            "consent_timestamp": consent_record_timestamp,
             "legal_issue": payload.legal_issue.strip(),
             "description": payload.description.strip(),
             "preferred_mode": payload.preferred_mode.strip().upper(),
@@ -457,6 +510,31 @@ class LawyerConnectManager:
         except Exception as e:
             logger.error(f"Error creating consultation request: {e}")
             raise HTTPException(status_code=500, detail="Database insertion failed for consultation request.")
+
+        # Register in-memory active grant for legal draft manager
+        if payload.include_draft and draft_id:
+            try:
+                from api.legal_drafts import legal_draft_manager
+                legal_draft_manager._in_memory_draft_grants[f"{str(payload.lawyer_user_id)}:{draft_id}"] = "ACTIVE"
+            except Exception:
+                pass
+
+        # If user explicitly consented to share case / draft with lawyer upon consultation request
+        if payload.include_draft and case_uuid:
+            try:
+                acc_payload = {
+                    "case_id": payload.case_id.strip().upper(),
+                    "case_uuid": case_uuid,
+                    "citizen_user_id": str(citizen_user.user_id),
+                    "lawyer_user_id": str(payload.lawyer_user_id),
+                    "consultation_request_id": req_id,
+                    "access_status": "ACTIVE",
+                    "shared_scope": "CASE_AND_DOCS",
+                    "granted_at": now_iso
+                }
+                self.supabase.table("lawyer_case_access").upsert(acc_payload, on_conflict="case_uuid, lawyer_user_id").execute()
+            except Exception as e:
+                logger.warning(f"Automatic case access grant on consultation request: {e}")
 
         # Dispatch Notifications with Persisted Source Request UUID
         if notification_manager:
@@ -825,6 +903,16 @@ class LawyerConnectManager:
             supabase_client=self.supabase
         )
 
+        # Mark in-memory draft grants as revoked
+        try:
+            from api.legal_drafts import legal_draft_manager
+            lawyer_prefix = f"{str(payload.lawyer_user_id)}:"
+            for k in list(legal_draft_manager._in_memory_draft_grants.keys()):
+                if k.startswith(lawyer_prefix):
+                    legal_draft_manager._in_memory_draft_grants[k] = "REVOKED"
+        except Exception:
+            pass
+
         # Notify Lawyer
         if notification_manager:
             try:
@@ -962,6 +1050,320 @@ class LawyerConnectManager:
         except Exception as e:
             logger.error(f"Error computing lawyer dashboard stats: {e}")
             raise HTTPException(status_code=500, detail="Database calculation failed for lawyer stats.")
+
+
+
+    # -----------------------------------------------------------------
+    # Lawyer Complaint Timeline & Grounded AI Assistant (Task 11)
+    # -----------------------------------------------------------------
+
+    def get_case_timeline_for_lawyer(self, lawyer_user: AuthUser, case_id: str) -> Dict[str, Any]:
+        """
+        Retrieves the complete authorized complaint timeline for a case shared with the lawyer.
+        - Enforces active lawyer status.
+        - Enforces active lawyer_case_access record with valid scope (CASE_AND_DOCS or FULL).
+        - Rejects METADATA_ONLY access or revoked access.
+        - Sanitizes internal notes, secrets, and confidential student PII.
+        - Assembles full chronological timeline and flags historical gaps.
+        """
+        if not lawyer_user or getattr(lawyer_user, "account_status", None) != AccountStatus.ACTIVE:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required.")
+
+        if lawyer_user.role != UserRole.LAWYER and lawyer_user.role != UserRole.PLATFORM_ADMIN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied: Lawyer role required.")
+
+        self._ensure_connected()
+        clean_case_id = (case_id or "").strip().upper()
+        lawyer_uid = str(lawyer_user.user_id)
+
+        # 1. Verify active lawyer_case_access
+        access = None
+        if self.supabase:
+            try:
+                acc_res = (
+                    self.supabase.table("lawyer_case_access")
+                    .select("*")
+                    .eq("lawyer_user_id", lawyer_uid)
+                    .eq("case_id", clean_case_id)
+                    .execute()
+                )
+                if acc_res.data and len(acc_res.data) > 0:
+                    access = acc_res.data[0]
+            except Exception as e:
+                logger.error(f"Error checking lawyer case access: {e}")
+
+        if not access:
+            access = getattr(self, "_in_memory_access", {}).get(f"{lawyer_uid}:{clean_case_id}")
+
+        if not access or access.get("access_status") != "ACTIVE":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied: No active case access authorization granted for case '{clean_case_id}'."
+            )
+
+        shared_scope = access.get("shared_scope", "CASE_AND_DOCS")
+        if shared_scope == "METADATA_ONLY":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access restricted: Consent scope is METADATA_ONLY. Full case timeline requires CASE_AND_DOCS or FULL authorization."
+            )
+
+        # 2. Fetch case records
+        case_rec = None
+        if self.supabase:
+            try:
+                c_res = self.supabase.table("cases").select("*").eq("case_id", clean_case_id).execute()
+                if c_res.data:
+                    case_rec = c_res.data[0]
+                else:
+                    camp_res = self.supabase.table("campus_cases").select("*").eq("case_id", clean_case_id).execute()
+                    if camp_res.data:
+                        case_rec = camp_res.data[0]
+            except Exception as e:
+                logger.error(f"Error fetching case for timeline: {e}")
+
+        if not case_rec:
+            case_rec = {}
+
+        # 3. Assemble timeline events
+        events = []
+        created_at = case_rec.get("created_at") or case_rec.get("filing_date")
+        if created_at:
+            events.append({
+                "event_id": f"{clean_case_id}-SUBMITTED",
+                "timestamp": created_at,
+                "event_type": "CASE_SUBMITTED",
+                "title": "Complaint Submitted",
+                "source": "CITIZEN",
+                "details": f"Initial complaint filed under category '{case_rec.get('category') or case_rec.get('case_type') or 'General'}'."
+            })
+
+        # Fetch case_activity_log if available (Strictly Sanitized)
+        if self.supabase:
+            try:
+                logs_res = (
+                    self.supabase.table("case_activity_log")
+                    .select("id, created_at, action_type, action_details")
+                    .eq("case_id", clean_case_id)
+                    .order("created_at", desc=False)
+                    .execute()
+                )
+                for log in (logs_res.data or []):
+                    action = log.get("action_type") or "CASE_UPDATE"
+                    # Exclude internal proctor/audit/PII logs
+                    if "INTERNAL" not in action and "AUDIT" not in action and "PII" not in action:
+                        raw_details = log.get("action_details")
+                        sanitized_details = raw_details
+                        if isinstance(raw_details, dict):
+                            sanitized_details = {
+                                k: v for k, v in raw_details.items()
+                                if k not in ("proctor_notes", "internal_notes", "tracking_key_hash",
+                                             "verification_key_hash", "password", "token", "secret",
+                                             "student_name", "student_email", "roll_number")
+                            }
+                        events.append({
+                            "event_id": str(log.get("id")),
+                            "timestamp": log.get("created_at"),
+                            "event_type": action,
+                            "title": action.replace("_", " ").title(),
+                            "source": "PROCTOR_AND_OFFICER",
+                            "details": sanitized_details
+                        })
+            except Exception as e:
+                logger.warning(f"Failed to fetch case activity log: {e}")
+
+        # Hearing events
+        hearing_date = case_rec.get("hearing_date")
+        if hearing_date and str(hearing_date).lower() != "pending proctorial review":
+            events.append({
+                "event_id": f"{clean_case_id}-HEARING",
+                "timestamp": str(hearing_date),
+                "event_type": "HEARING_SCHEDULED",
+                "title": "Disciplinary Hearing Scheduled",
+                "source": "COMMITTEE",
+                "details": f"Proctorial hearing scheduled for {hearing_date}. Action taken: {case_rec.get('action_taken') or 'Under inquiry'}."
+            })
+
+        # Permitted Documents from case_documents
+        if self.supabase and shared_scope in ("CASE_AND_DOCS", "FULL"):
+            try:
+                doc_res = (
+                    self.supabase.table("case_documents")
+                    .select("id, file_name, file_size_bytes, mime_type, is_confidential, created_at")
+                    .eq("case_id", clean_case_id)
+                    .execute()
+                )
+                for doc in (doc_res.data or []):
+                    # Only include documents that are permitted under sharing scope
+                    if not doc.get("is_confidential") or shared_scope == "FULL":
+                        events.append({
+                            "event_id": f"DOC-{doc.get('id')}",
+                            "timestamp": doc.get("created_at"),
+                            "event_type": "DOCUMENT_SUBMITTED",
+                            "title": f"Document Submitted: {doc.get('file_name')}",
+                            "source": "CASE_DOCUMENT",
+                            "details": f"Supporting evidence uploaded ({doc.get('mime_type')}, {doc.get('file_size_bytes', 0)} bytes)."
+                        })
+            except Exception as e_doc:
+                logger.warning(f"Error querying case documents for timeline: {e_doc}")
+
+        # Consultation & lawyer events
+        if access.get("granted_at"):
+            events.append({
+                "event_id": f"{clean_case_id}-ACCESS-GRANTED",
+                "timestamp": access.get("granted_at"),
+                "event_type": "CONSULTATION_AUTHORIZED",
+                "title": "Legal Counsel Access Granted",
+                "source": "LAWYER_CONNECT",
+                "details": f"Citizen explicitly authorized case review under scope '{shared_scope}'."
+            })
+
+        # Resolution / Closure milestones
+        c_status = (case_rec.get("status") or "").upper()
+        if c_status in ("RESOLVED", "CLOSED"):
+            events.append({
+                "event_id": f"{clean_case_id}-RESOLUTION",
+                "timestamp": case_rec.get("updated_at") or case_rec.get("created_at"),
+                "event_type": "CASE_RESOLVED" if c_status == "RESOLVED" else "CASE_CLOSED",
+                "title": "Case Resolved" if c_status == "RESOLVED" else "Case Closed",
+                "source": "PROCTOR_AND_OFFICER",
+                "details": f"Final administrative disposition: {case_rec.get('action_taken') or 'Case concluded on file.'}"
+            })
+
+        # Strict chronological ordering
+        events.sort(key=lambda x: str(x.get("timestamp") or ""))
+
+        # Check for history gaps
+        gaps = []
+        if len(events) <= 1:
+            gaps.append("Notice: Initial case history is sparse. Intermediary inquiry notes are pending or unshared.")
+        elif len(events) >= 2:
+            try:
+                t0 = datetime.fromisoformat(events[0]["timestamp"].replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(events[1]["timestamp"].replace("Z", "+00:00"))
+                if (t1 - t0).days > 14:
+                    gaps.append(f"Notice: A chronological gap of {(t1 - t0).days} days exists between submission and subsequent registered activity.")
+            except Exception:
+                pass
+
+        return {
+            "case_id": clean_case_id,
+            "category": case_rec.get("category") or case_rec.get("case_type") or "General",
+            "current_status": case_rec.get("status") or "ACTIVE",
+            "shared_scope": shared_scope,
+            "access_granted_at": access.get("granted_at"),
+            "events": events,
+            "total_events": len(events),
+            "timeline_gaps": gaps
+        }
+
+    def generate_ai_case_summary(self, lawyer_user: AuthUser, case_id: str) -> Dict[str, Any]:
+        """
+        Produces a grounded, non-hallucinatory AI case briefing for counsel,
+        linking each point directly to verified timeline event records.
+        AI cannot invent dates, hearings, orders, decisions, or citations.
+        Unsupported legal recommendations are identified as requiring professional review.
+        """
+        timeline_data = self.get_case_timeline_for_lawyer(lawyer_user, case_id)
+        events = timeline_data.get("events", [])
+        gaps = timeline_data.get("timeline_gaps", [])
+
+        key_developments = []
+        actions_taken = []
+        for ev in events:
+            ev_id = ev.get("event_id")
+            ev_ts = ev.get("timestamp")
+            ev_type = ev.get("event_type")
+            ev_title = ev.get("title")
+            ev_src = ev.get("source")
+            key_developments.append({
+                "source_event_id": ev_id,
+                "date": ev_ts,
+                "title": ev_title,
+                "event_type": ev_type,
+                "source_record": ev_src,
+                "summary": ev.get("details")
+            })
+            if ev_type in ("CASE_SUBMITTED", "HEARING_SCHEDULED", "RESOLUTION", "CONSULTATION_AUTHORIZED", "CASE_RESOLVED", "CASE_CLOSED"):
+                actions_taken.append(f"[{ev_ts[:10] if ev_ts else 'N/A'}] {ev_title}: {ev.get('details')}")
+
+        pending_actions = []
+        curr_status = timeline_data.get("current_status", "ACTIVE")
+        if curr_status in ("SUBMITTED", "ACTIVE", "FILED"):
+            pending_actions.append("Awaiting formal administrative acknowledgment and assignment of dealing officer.")
+        elif curr_status in ("HEARING_SCHEDULED", "UNDER_INQUIRY"):
+            pending_actions.append("Preparation of witness statements and evidentiary documents for scheduled hearing.")
+        elif curr_status in ("RESOLVED", "CLOSED"):
+            pending_actions.append("Review compliance of resolution terms and verify formal implementation.")
+
+        investigation_questions = [
+            "Are there supplementary electronic records (emails, payment receipts, written representations) not yet attached to the dossier?",
+            "Has the citizen received any informal verbal communication or preliminary notice from the respondent authority?",
+            "Is there an urgency or interim relief requirement that necessitates immediate statutory injunction or notice?"
+        ]
+
+        # Strict Source Validation: Validate every key development against actual timeline records
+        # Rejects or removes unsupported source references, validates timestamps, and enables navigation
+        authorized_event_map = {str(ev.get("event_id")): ev for ev in events if ev.get("event_id")}
+        validated_key_developments = []
+
+        for kd in key_developments:
+            src_id = str(kd.get("source_event_id") or "")
+            if not src_id or src_id not in authorized_event_map:
+                logger.warning(f"Dropping AI development referencing unverified event ID: {src_id}")
+                continue
+
+            orig_ev = authorized_event_map[src_id]
+            # Validate and align referenced timestamp with authoritative record
+            if kd.get("date") != orig_ev.get("timestamp"):
+                kd["date"] = orig_ev.get("timestamp")
+
+            # Enable direct UI navigation anchor for the advocate
+            kd["nav_target_id"] = f"timeline-event-{src_id}"
+            validated_key_developments.append(kd)
+
+        # Flags for incomplete or potentially misleading records
+        warnings = []
+        if len(events) <= 2:
+            warnings.append("Notice: Timeline is sparse; initial complaint and subsequent records are limited.")
+        if gaps:
+            warnings.extend(gaps)
+        warnings.append("Statutory Reminder: Unsupported legal recommendations require independent professional review by an advocate.")
+
+        uncertainty_notice = None
+        if len(events) <= 2 or gaps:
+            uncertainty_notice = (
+                "Uncertainty Alert: Case history is sparse or contains chronological gaps. "
+                "Intermediary inquiry proceedings or internal records may not be reflected in this timeline. "
+                "Independent factual corroboration with the client is required."
+            )
+
+        summary_text = (
+            f"Matter {timeline_data.get('case_id')} ({timeline_data.get('category')}) currently stands at status '{curr_status}'. "
+            f"A total of {len(events)} verified timeline events are on record, commencing from {events[0].get('timestamp', 'initial filing') if events else 'filing'}. "
+            f"Authorized review scope: {timeline_data.get('shared_scope')}."
+        )
+
+        return {
+            "case_id": timeline_data.get("case_id"),
+            "is_ai_generated": True,
+            "disclaimer": (
+                "AI-generated case intelligence grounded strictly in verified case records. "
+                "Does not constitute formal legal counsel. AI processing cannot be guaranteed completely "
+                "hallucination-proof; all findings link directly to underlying source records and require "
+                "independent professional review by an advocate."
+            ),
+            "uncertainty_notice": uncertainty_notice,
+            "current_status": curr_status,
+            "summary": summary_text,
+            "key_developments": validated_key_developments,
+            "actions_taken": actions_taken,
+            "pending_actions": pending_actions,
+            "documentation_gaps": gaps,
+            "documentation_warnings": warnings,
+            "investigation_questions": investigation_questions,
+            "verified_timeline_event_count": len(events)
+        }
 
 
 lawyer_connect_manager = LawyerConnectManager()
