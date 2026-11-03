@@ -205,3 +205,4 @@ To proceed from this stop state to successful preflight execution:
    - Option B: Set `SUPABASE_DB_PASSWORD` or `DATABASE_URL` pointing to the remote project pooler (`aws-0-ap-south-1.pooler.supabase.com:6543/postgres`).
 3. [ ] **Action 3 (Run Authenticated Preflight):** Re-run the read-only inspection script with `PGOPTIONS='-c default_transaction_read_only=on'` to dump and verify `supabase_migrations.schema_migrations` and catalog tables.
 4. [ ] **Action 4 (Separate Authorization for Migration):** Acknowledge preflight report and provide explicit approval before executing any remote DDL.
+
