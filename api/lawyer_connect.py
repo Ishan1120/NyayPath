@@ -447,21 +447,30 @@ class LawyerConnectManager:
                     except Exception as claim_err:
                         logger.warning(f"Failed to claim unowned case {clean_case_id}: {claim_err}")
 
+                # Check if citizen owns a legal draft linked to this case
                 if str(owner_uid).lower() != str(citizen_user.user_id).lower():
-                    if payload.include_draft and payload.draft_id:
-                        # Mismatched case_id from stale browser session, but citizen is sharing their own draft.
-                        # Disassociate foreign case_id so the draft consultation succeeds cleanly.
-                        logger.warning(
-                            f"Disassociating foreign case_id {clean_case_id} (owner {owner_uid}) "
-                            f"from citizen {citizen_user.user_id}'s draft consultation."
-                        )
-                        case_uuid = None
-                        payload.case_id = None
-                    else:
-                        raise HTTPException(
-                            status_code=status.HTTP_403_FORBIDDEN,
-                            detail="Access denied: You can only link cases owned by your account."
-                        )
+                    try:
+                        d_check = self.supabase.table("legal_drafts").select("id").eq("case_id", clean_case_id).eq("user_id", str(citizen_user.user_id)).execute()
+                        if d_check.data and len(d_check.data) > 0:
+                            owner_uid = str(citizen_user.user_id)
+                            cdata["citizen_user_id"] = str(citizen_user.user_id)
+                            cdata["user_id"] = str(citizen_user.user_id)
+                            self.supabase.table("cases").update({
+                                "data": cdata,
+                                "updated_at": datetime.now(timezone.utc).isoformat()
+                            }).eq("id", c_rec.get("id")).execute()
+                    except Exception as de:
+                        logger.warning(f"Draft ownership check error: {de}")
+
+                if str(owner_uid).lower() != str(citizen_user.user_id).lower():
+                    # Foreign or mismatched case_id from stale browser session, but citizen is submitting a consultation.
+                    # Disassociate foreign case_id so consultation request succeeds cleanly without 403.
+                    logger.warning(
+                        f"Disassociating foreign case_id {clean_case_id} (owner {owner_uid}) "
+                        f"from citizen {citizen_user.user_id}'s consultation."
+                    )
+                    case_uuid = None
+                    payload.case_id = None
                 else:
                     case_uuid = c_rec.get("id")
 

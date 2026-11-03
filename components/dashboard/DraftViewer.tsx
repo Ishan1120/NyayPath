@@ -1,8 +1,10 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
+  ArrowRight,
   Copy,
   Download,
   CheckCheck,
@@ -326,7 +328,7 @@ export default function DraftViewer({
       setTimeout(() => {
         setIsLawyerModalOpen(false);
         setConsultationSuccess(null);
-      }, 3500);
+      }, 7000);
     } catch (err: any) {
       console.error('Failed to submit consultation request:', err);
       alert(err?.response?.data?.detail || err?.message || 'Failed to submit consultation request.');
@@ -674,12 +676,31 @@ export default function DraftViewer({
               </div>
 
               {consultationSuccess ? (
-                <div className="p-5 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-900 space-y-2">
+                <div className="p-5 bg-emerald-50 border border-emerald-200 rounded-2xl text-emerald-900 space-y-3">
                   <div className="flex items-center gap-2 font-bold text-sm">
                     <CheckCircle2 size={18} className="text-emerald-600" />
                     <span>Consultation Request Registered!</span>
                   </div>
                   <p className="text-xs leading-relaxed">{consultationSuccess}</p>
+                  <div className="pt-2 flex items-center gap-2.5">
+                    <Link
+                      href="/dashboard/consultations"
+                      className="px-4 py-2 bg-court-maroon hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <span>Track in Consultations</span>
+                      <ArrowRight size={13} />
+                    </Link>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsLawyerModalOpen(false);
+                        setConsultationSuccess(null);
+                      }}
+                      className="px-3 py-2 text-xs text-slate-600 hover:text-slate-900 font-medium cursor-pointer"
+                    >
+                      Close
+                    </button>
+                  </div>
                 </div>
               ) : selectedLawyer ? (
                 // Step 2: Form to confirm consultation & explicit draft sharing consent

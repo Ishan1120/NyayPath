@@ -1066,7 +1066,30 @@ class CitizenWorkspaceManager:
                             row["case_type"] = row.get("case_type") or "CAMPUS_GRIEVANCE"
                             user_cases.append(row)
 
-                # 2. Query cases table where data->>'citizen_user_id' == user_id
+                # 2. Check legal_drafts to find all case IDs associated with this user's drafts
+                user_linked_cases = set()
+                try:
+                    d_res = self.supabase.table("legal_drafts").select("case_id").eq("user_id", str(user_id)).execute()
+                    if d_res.data:
+                        for d in d_res.data:
+                            cid_val = d.get("case_id")
+                            if cid_val and isinstance(cid_val, str) and cid_val.strip():
+                                user_linked_cases.add(cid_val.strip().upper())
+                except Exception as de:
+                    logger.warning(f"Error checking legal drafts for cases: {de}")
+
+                # 3. Check consultation_requests to find case IDs consulted by this citizen
+                try:
+                    cr_res = self.supabase.table("consultation_requests").select("case_id").eq("citizen_user_id", str(user_id)).execute()
+                    if cr_res.data:
+                        for cr in cr_res.data:
+                            cr_cid = cr.get("case_id")
+                            if cr_cid and isinstance(cr_cid, str) and cr_cid.strip():
+                                user_linked_cases.add(cr_cid.strip().upper())
+                except Exception as cre:
+                    logger.warning(f"Error checking consultations for cases: {cre}")
+
+                # 4. Query cases table where data->>'citizen_user_id' == user_id OR case_id is linked
                 res_cases = self.supabase.table("cases").select("*").execute()
                 if res_cases.data:
                     for row in res_cases.data:
@@ -1074,8 +1097,17 @@ class CitizenWorkspaceManager:
                         if cid and cid not in seen_case_ids:
                             cdata = row.get("data") or {}
                             if isinstance(cdata, dict):
-                                c_uid = cdata.get("citizen_user_id") or cdata.get("student_user_id") or cdata.get("user_id")
-                                if c_uid == user_id:
+                                c_uid = (
+                                    cdata.get("citizen_user_id") or 
+                                    cdata.get("student_user_id") or 
+                                    cdata.get("user_id") or
+                                    row.get("citizen_user_id") or
+                                    row.get("user_id")
+                                )
+                                matches_user = (str(c_uid).lower() == str(user_id).lower()) if c_uid else False
+                                matches_linked = (cid.upper() in user_linked_cases)
+
+                                if matches_user or matches_linked:
                                     seen_case_ids.add(cid)
                                     flattened = dict(cdata)
                                     flattened["case_id"] = cid
@@ -1184,16 +1216,25 @@ class CitizenWorkspaceManager:
         docs = case.get("supporting_documents")
         doc_count = len(docs) if isinstance(docs, list) else 0
 
+        sub = (
+            case.get("subject") or
+            case.get("sub_category") or
+            (case.get("user_problem", "")[:75] + ("..." if len(case.get("user_problem", "")) > 75 else "")) or
+            case.get("case_id")
+        )
+        desc = case.get("description") or case.get("facts") or case.get("user_problem") or ""
+        cat = case.get("category") or case.get("sub_category") or case.get("route") or "General"
+
         return {
             "id": case.get("id"),
             "case_id": case.get("case_id"),
             "case_type": case.get("case_type") or "CAMPUS_GRIEVANCE",
-            "category": case.get("category") or "General",
-            "subject": case.get("subject") or case.get("case_id"),
-            "description": case.get("description") or case.get("facts") or "",
+            "category": cat,
+            "subject": sub,
+            "description": desc,
             "status": (case.get("status") or "SUBMITTED").upper(),
             "severity": case.get("severity") or "NORMAL",
-            "department": case.get("department"),
+            "department": case.get("department") or case.get("target_department"),
             "year": case.get("year"),
             "institution_id": case.get("institution_id"),
             "hearing_date": case.get("hearing_date"),

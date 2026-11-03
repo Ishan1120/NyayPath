@@ -263,6 +263,13 @@ export default function DashboardPage() {
                     <Briefcase className="w-3.5 h-3.5" />
                     <span>My Cases</span>
                   </Link>
+                  <Link
+                    href="/dashboard/consultations"
+                    className="px-4 py-2 rounded-xl bg-court-maroon hover:bg-rose-700 text-white text-xs font-bold transition-all shadow-sm flex items-center gap-1.5"
+                  >
+                    <Scale className="w-3.5 h-3.5" />
+                    <span>Consultations</span>
+                  </Link>
                   <button
                     onClick={handleSignOut}
                     className="p-2 rounded-xl text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"

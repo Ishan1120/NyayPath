@@ -72,7 +72,7 @@ class CaseManager:
         chars = string.ascii_uppercase + string.digits
         return f"CR-{''.join(random.choices(chars, k=4))}-{''.join(random.choices(chars, k=4))}"
 
-    def create_case(self, life_liberty: bool = False, tracking_credential: Optional[str] = None) -> str:
+    def create_case(self, life_liberty: bool = False, tracking_credential: Optional[str] = None, citizen_user_id: Optional[str] = None) -> str:
         self._ensure_connected()
         case_id = self._generate_case_id()
         internal_uuid = str(uuid.uuid4())
@@ -93,6 +93,8 @@ class CaseManager:
             "filing_date": now_iso,
             "response_due_date": due_dt.isoformat(),
             "first_appeal_due_date": first_appeal_due_dt.isoformat(),
+            "citizen_user_id": str(citizen_user_id) if citizen_user_id else None,
+            "user_id": str(citizen_user_id) if citizen_user_id else None,
             "life_liberty_flag": life_liberty,
             "watchdog_enabled": True,
             "watchdog_status": "ACTIVE",

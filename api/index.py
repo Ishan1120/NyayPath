@@ -352,8 +352,10 @@ def health_check():
     }
 
 @app.post("/api/case/init", response_model=CaseInitResponse)
-def init_case():
-    new_case_id = case_manager.create_case()
+def init_case(request: Request):
+    user = get_current_user_optional(request)
+    user_id = str(user.user_id) if user else None
+    new_case_id = case_manager.create_case(citizen_user_id=user_id)
     return CaseInitResponse(case_id=new_case_id, message="Save this ID safely.")
 
 @app.post("/api/translate")
@@ -408,8 +410,10 @@ async def transcribe_audio(
         return {"text": "failed", "transcription": "failed"}
 
 @app.post("/api/case/classify")
-def classify_problem(payload: ClassifyRequest):
-    case_id = payload.case_id or case_manager.create_case()
+def classify_problem(payload: ClassifyRequest, request: Request):
+    user = get_current_user_optional(request)
+    user_id = str(user.user_id) if user else None
+    case_id = payload.case_id or case_manager.create_case(citizen_user_id=user_id)
     case = case_manager.get_case(case_id) or {}
 
     problem_text = payload.problem_text or case.get("user_problem", "")
@@ -417,7 +421,7 @@ def classify_problem(payload: ClassifyRequest):
 
     result = classifier.classify(problem_text, language)
     
-    case_manager.update_case(case_id, {
+    updates = {
         "status": "classified",
         "route": result["route"],
         "sub_category": result["sub_category"],
@@ -426,7 +430,11 @@ def classify_problem(payload: ClassifyRequest):
         "extracted_facts": result.get("extracted_data", {}),
         "facts_analysis": result.get("facts_analysis"),
         "language": language
-    })
+    }
+    if user_id:
+        updates["citizen_user_id"] = user_id
+        updates["user_id"] = user_id
+    case_manager.update_case(case_id, updates)
 
     return {**result, "case_id": case_id}
 
@@ -438,8 +446,10 @@ def compute_readiness(payload: ReadinessRequest):
     return calculate_readiness_score(form_data, route)
 
 @app.post("/api/rti/generate")
-def generate_rti(payload: FormSubmitRequest):
-    case_id = payload.case_id or case_manager.create_case()
+def generate_rti(payload: FormSubmitRequest, request: Request):
+    user = get_current_user_optional(request)
+    user_id = str(user.user_id) if user else None
+    case_id = payload.case_id or case_manager.create_case(citizen_user_id=user_id)
     case = case_manager.get_case(case_id) or {}
 
     user_problem = case.get("user_problem", "Public Records & Inspection Inquiry")
@@ -448,11 +458,15 @@ def generate_rti(payload: FormSubmitRequest):
     
     draft = outcome_engine.generate_initial_rti(form_data, user_problem, language)
 
-    case_manager.update_case(case_id, {
+    updates = {
         "status": "rti_drafted",
         "form_data": form_data,
         "initial_draft": draft
-    })
+    }
+    if user_id:
+        updates["citizen_user_id"] = user_id
+        updates["user_id"] = user_id
+    case_manager.update_case(case_id, updates)
     return {"case_id": case_id, "initial_draft": draft}
 
 @app.post("/api/rti/predict")
@@ -592,8 +606,10 @@ def generate_appeal_pdf_endpoint(payload: FirstAppealRequest):
         raise HTTPException(status_code=500, detail="Failed to generate First Appeal PDF")
 
 @app.post("/api/grievance/generate")
-def generate_grievance(payload: GrievanceGenerateRequest):
-    case_id = payload.case_id or case_manager.create_case()
+def generate_grievance(payload: GrievanceGenerateRequest, request: Request):
+    user = get_current_user_optional(request)
+    user_id = str(user.user_id) if user else None
+    case_id = payload.case_id or case_manager.create_case(citizen_user_id=user_id)
     case = case_manager.get_case(case_id) or {}
 
     form_data = payload.form_data or case.get("form_data", {})
@@ -622,11 +638,15 @@ def generate_grievance(payload: GrievanceGenerateRequest):
         print(f"Grievance resolution fallback: {e}")
         pack = grievance_resolver._fallback()
 
-    case_manager.update_case(case_id, {
+    updates = {
         "status": "grievance_completed",
         "form_data": parsed_form_data,
         "grievance_pack": pack
-    })
+    }
+    if user_id:
+        updates["citizen_user_id"] = user_id
+        updates["user_id"] = user_id
+    case_manager.update_case(case_id, updates)
 
     return {"case_id": case_id, **pack}
 
@@ -1660,8 +1680,10 @@ def get_clarifying_questions(payload: ClarifyingQuestionsRequest):
     return recognize_and_generate_questions(payload.problem_text, payload.language)
 
 @app.post("/api/intake/synthesize-draft")
-def synthesize_draft_endpoint(payload: SynthesizeDraftRequest):
-    case_id = payload.case_id or case_manager.create_case()
+def synthesize_draft_endpoint(payload: SynthesizeDraftRequest, request: Request):
+    user = get_current_user_optional(request)
+    user_id = str(user.user_id) if user else None
+    case_id = payload.case_id or case_manager.create_case(citizen_user_id=user_id)
     case = case_manager.get_case(case_id) or {}
     
     applicant_name = payload.applicant_name
@@ -1677,14 +1699,18 @@ def synthesize_draft_endpoint(payload: SynthesizeDraftRequest):
     )
     
     # Update case manager
-    case_manager.update_case(case_id, {
+    updates = {
         "status": "rti_drafted" if (payload.route == "RTI" or res.get("likely_route") == "RTI") else "grievance_completed",
         "initial_draft": res["systematic_draft"],
         "improved_draft": res["systematic_draft"],
         "lawyer_brief": res["lawyer_brief"],
         "clarifying_answers": payload.answers,
         "form_data": {**case.get("form_data", {}), **payload.answers}
-    })
+    }
+    if user_id:
+        updates["citizen_user_id"] = user_id
+        updates["user_id"] = user_id
+    case_manager.update_case(case_id, updates)
     
     return {"case_id": case_id, **res}
 
