@@ -12,7 +12,10 @@ from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from fastapi import HTTPException, status
 
-from api.auth import AuthUser, AccountStatus, UserRole
+try:
+    from .auth import AuthUser, AccountStatus, UserRole
+except (ImportError, ValueError):
+    from auth import AuthUser, AccountStatus, UserRole
 
 logger = logging.getLogger(__name__)
 

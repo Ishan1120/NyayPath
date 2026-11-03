@@ -1102,7 +1102,10 @@ class CitizenWorkspaceManager:
                 user_cases.append(dict(c))
 
         try:
-            from api.campus_proctor import campus_proctor_manager
+            try:
+                from .campus_proctor import campus_proctor_manager
+            except (ImportError, ValueError):
+                from campus_proctor import campus_proctor_manager
             # Check SQLite
             if campus_proctor_manager.db_path and os.path.exists(campus_proctor_manager.db_path):
                 import sqlite3
@@ -1170,7 +1173,10 @@ class CitizenWorkspaceManager:
         if case_id in self._memory_cases:
             return dict(self._memory_cases[case_id])
 
-        from api.campus_proctor import campus_proctor_manager
+        try:
+            from .campus_proctor import campus_proctor_manager
+        except (ImportError, ValueError):
+            from campus_proctor import campus_proctor_manager
         return campus_proctor_manager._fetch_raw_case(case_id)
 
     def _sanitize_summary_case(self, case: Dict[str, Any]) -> Dict[str, Any]:

@@ -514,7 +514,10 @@ class LawyerConnectManager:
         # Register in-memory active grant for legal draft manager
         if payload.include_draft and draft_id:
             try:
-                from api.legal_drafts import legal_draft_manager
+                try:
+                    from .legal_drafts import legal_draft_manager
+                except (ImportError, ValueError):
+                    from legal_drafts import legal_draft_manager
                 legal_draft_manager._in_memory_draft_grants[f"{str(payload.lawyer_user_id)}:{draft_id}"] = "ACTIVE"
             except Exception:
                 pass
@@ -905,7 +908,10 @@ class LawyerConnectManager:
 
         # Mark in-memory draft grants as revoked
         try:
-            from api.legal_drafts import legal_draft_manager
+            try:
+                from .legal_drafts import legal_draft_manager
+            except (ImportError, ValueError):
+                from legal_drafts import legal_draft_manager
             lawyer_prefix = f"{str(payload.lawyer_user_id)}:"
             for k in list(legal_draft_manager._in_memory_draft_grants.keys()):
                 if k.startswith(lawyer_prefix):

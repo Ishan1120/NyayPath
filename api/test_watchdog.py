@@ -1,15 +1,27 @@
 import unittest
 from datetime import datetime, timedelta, timezone
-from api.watchdog_engine import (
-    calculate_deadlines,
-    calculate_section_20_penalty,
-    evaluate_watchdog_state,
-    notify_case_event,
-    run_scheduled_watchdog,
-    SECTION_20_DAILY_PENALTY_INR,
-    SECTION_20_MAX_PENALTY_INR
-)
-from api.case_manager import CaseManager
+try:
+    from .watchdog_engine import (
+        calculate_deadlines,
+        calculate_section_20_penalty,
+        evaluate_watchdog_state,
+        notify_case_event,
+        run_scheduled_watchdog,
+        SECTION_20_DAILY_PENALTY_INR,
+        SECTION_20_MAX_PENALTY_INR
+    )
+    from .case_manager import CaseManager
+except (ImportError, ValueError):
+    from watchdog_engine import (
+        calculate_deadlines,
+        calculate_section_20_penalty,
+        evaluate_watchdog_state,
+        notify_case_event,
+        run_scheduled_watchdog,
+        SECTION_20_DAILY_PENALTY_INR,
+        SECTION_20_MAX_PENALTY_INR
+    )
+    from case_manager import CaseManager
 
 class TestWatchdogEngine(unittest.TestCase):
 

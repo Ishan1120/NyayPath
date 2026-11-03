@@ -13,7 +13,10 @@ import logging
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 
-from api.auth import AuthUser, UserRole
+try:
+    from .auth import AuthUser, UserRole
+except (ImportError, ValueError):
+    from auth import AuthUser, UserRole
 
 logger = logging.getLogger("nyaypath.audit")
 

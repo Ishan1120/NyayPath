@@ -31,8 +31,12 @@ try:
 except ImportError:
     create_client, Client = None, None
 
-from api.auth import AuthUser, UserRole, AccountStatus
-from api.notifications import notification_manager
+try:
+    from .auth import AuthUser, UserRole, AccountStatus
+    from .notifications import notification_manager
+except (ImportError, ValueError):
+    from auth import AuthUser, UserRole, AccountStatus
+    from notifications import notification_manager
 
 logger = logging.getLogger("nyaypath.platform_admin")
 

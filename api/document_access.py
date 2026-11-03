@@ -21,9 +21,14 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status
 
-from api.auth import AuthUser, UserRole, AccountStatus, decode_access_token
-from api.campus_proctor import hash_verification_key
-from api.rate_limiter import rate_limiter
+try:
+    from .auth import AuthUser, UserRole, AccountStatus, decode_access_token
+    from .campus_proctor import hash_verification_key
+    from .rate_limiter import rate_limiter
+except (ImportError, ValueError):
+    from auth import AuthUser, UserRole, AccountStatus, decode_access_token
+    from campus_proctor import hash_verification_key
+    from rate_limiter import rate_limiter
 
 logger = logging.getLogger("nyaypath.documents")
 
@@ -57,7 +62,10 @@ class DocumentAccessManager:
         if self._supabase is not None:
             return self._supabase
         try:
-            from api.campus_proctor import campus_proctor_manager
+            try:
+                from .campus_proctor import campus_proctor_manager
+            except (ImportError, ValueError):
+                from campus_proctor import campus_proctor_manager
             return getattr(campus_proctor_manager, "supabase", None)
         except Exception:
             return None
@@ -405,7 +413,10 @@ class DocumentAccessManager:
             )
 
         # Local test fallback
-        from api.campus_proctor import campus_proctor_manager
+        try:
+            from .campus_proctor import campus_proctor_manager
+        except (ImportError, ValueError):
+            from campus_proctor import campus_proctor_manager
         return campus_proctor_manager._fetch_raw_case(case_id)
 
     def _create_signed_url(self, case_id: str, document_id: str, access_type: str, ttl: int = SIGNED_URL_EXPIRY_SECONDS) -> Dict[str, Any]:

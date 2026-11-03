@@ -1043,6 +1043,9 @@ def require_platform_admin(request: Request) -> AuthUser:
             detail=f"Access denied: Role '{user.role.value}' lacks platform administrator privileges."
         )
 
-    from api.platform_admin import platform_admin_manager
+    try:
+        from .platform_admin import platform_admin_manager
+    except (ImportError, ValueError):
+        from platform_admin import platform_admin_manager
     platform_admin_manager.verify_platform_admin(user)
     return user
