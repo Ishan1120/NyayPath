@@ -836,6 +836,22 @@ LOCAL_OFFICER_REGISTRY: Dict[str, Dict[str, Any]] = {
         "role": UserRole.STUDENT,
         "institution_id": "INST_COLLEGE_X",
         "account_status": AccountStatus.ACTIVE
+    },
+    "advocate.rajesh@bar.in": {
+        "user_id": "77777777-1111-2222-3333-777777777777",
+        "name": "Adv. Rajesh Kumar",
+        "password_hash": _SAMPLE_HASH,
+        "role": UserRole.LAWYER,
+        "institution_id": "INST_DEFAULT",
+        "account_status": AccountStatus.ACTIVE
+    },
+    "advocate.priya@bar.in": {
+        "user_id": "88888888-1111-2222-3333-888888888888",
+        "name": "Adv. Priya Sharma",
+        "password_hash": _SAMPLE_HASH,
+        "role": UserRole.LAWYER,
+        "institution_id": "INST_DEFAULT",
+        "account_status": AccountStatus.ACTIVE
     }
 }
 

@@ -100,6 +100,10 @@ export default function DashboardPage() {
       const res = await loginCitizen({ email, password: pass });
       if (res?.token && res?.user) {
         localStorage.setItem('nyaypath_citizen_token', res.token);
+        localStorage.setItem('nyaypath_token', res.token);
+        if (res.user.role === 'lawyer') {
+          localStorage.setItem('nyaypath_lawyer_token', res.token);
+        }
         localStorage.setItem('nyaypath_user', JSON.stringify(res.user));
         setShowAuthModal(false);
         fetchStats();

@@ -26,7 +26,8 @@ import {
   Download,
   AlertCircle,
   ArrowRight,
-  LogIn
+  LogIn,
+  LogOut
 } from 'lucide-react';
 import {
   getLawyerDashboardStats,
@@ -36,7 +37,8 @@ import {
   updateLawyerProfile,
   LawyerDashboardStats,
   ConsultationRequest,
-  LawyerProfile
+  LawyerProfile,
+  loginCitizen
 } from '@/lib/api';
 
 export default function LawyerDashboardPage() {
@@ -84,6 +86,45 @@ export default function LawyerDashboardPage() {
     languages: [] as string[]
   });
   const [profileSaving, setProfileSaving] = useState(false);
+
+  // Advocate Quick Auth modal state
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  const handleQuickLogin = async (email: string, pass: string) => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const res = await loginCitizen({ email, password: pass });
+      if (res?.token && res?.user) {
+        localStorage.setItem('nyaypath_lawyer_token', res.token);
+        localStorage.setItem('nyaypath_token', res.token);
+        localStorage.setItem('nyaypath_user', JSON.stringify(res.user));
+        setShowAuthModal(false);
+        setError(null);
+        fetchData();
+      } else {
+        setAuthError('Authentication failed: Invalid advocate credentials.');
+      }
+    } catch (err: any) {
+      setAuthError(err?.response?.data?.detail || 'Login failed. Please check advocate credentials.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = () => {
+    localStorage.removeItem('nyaypath_lawyer_token');
+    localStorage.removeItem('nyaypath_token');
+    localStorage.removeItem('nyaypath_user');
+    setStats(null);
+    setConsultations([]);
+    setSharedCases([]);
+    setError('UNAUTHENTICATED');
+  };
 
   const fetchData = async () => {
     setLoading(true);
@@ -259,6 +300,17 @@ export default function LawyerDashboardPage() {
               <Scale size={13} />
               <span>Register / Onboard</span>
             </Link>
+            {error !== 'UNAUTHENTICATED' && (
+              <button
+                type="button"
+                onClick={handleSignOut}
+                className="px-3 py-2 bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-100 rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 cursor-pointer"
+                title="Sign Out"
+              >
+                <LogOut size={13} />
+                <span>Sign Out</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -275,9 +327,17 @@ export default function LawyerDashboardPage() {
               </div>
             </div>
             <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowAuthModal(true)}
+                className="px-4 py-2 bg-court-maroon text-white rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-rose-700 shadow flex items-center gap-1.5 cursor-pointer"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Sign In Advocate</span>
+              </button>
               <Link
                 href="/lawyer/register"
-                className="px-4 py-2 bg-court-maroon text-white rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-rose-700 shadow"
+                className="px-4 py-2 bg-white border border-amber-300 text-amber-900 rounded-xl text-xs font-bold uppercase tracking-wider hover:bg-amber-100 shadow"
               >
                 Onboard Advocate
               </Link>
@@ -812,6 +872,117 @@ export default function LawyerDashboardPage() {
             </div>
           </div>
         )}
+
+        {/* Quick Advocate Sign-In Modal */}
+        {showAuthModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 font-sans">
+            <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in duration-150">
+              <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-full bg-rose-100 flex items-center justify-center text-court-maroon font-bold text-xs">
+                    <Scale className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900 text-sm">Advocate Portal Authentication</h3>
+                    <p className="text-[11px] text-slate-500">Sign in with Bar Council credentials</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAuthModal(false)}
+                  className="text-slate-400 hover:text-slate-600 text-sm font-bold cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleQuickLogin(authEmail, authPassword);
+                }}
+                className="mt-4 space-y-4"
+              >
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">Advocate Email</label>
+                  <input
+                    type="email"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-court-maroon focus:outline-none"
+                    placeholder="advocate.rajesh@bar.in"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 uppercase mb-1">Password</label>
+                  <input
+                    type="password"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-court-maroon focus:outline-none"
+                    placeholder="Enter password"
+                    required
+                  />
+                </div>
+
+                {authError && (
+                  <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs">
+                    {authError}
+                  </div>
+                )}
+
+                {/* Quick-fill accounts for demo */}
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block mb-1.5">
+                    Demo Verified Advocates (Click to fill):
+                  </span>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthEmail('advocate.rajesh@bar.in');
+                        setAuthPassword('ProctorPass@2026!');
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800 text-[11px] font-semibold hover:border-court-maroon cursor-pointer"
+                    >
+                      Adv. Rajesh Kumar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAuthEmail('advocate.priya@bar.in');
+                        setAuthPassword('ProctorPass@2026!');
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800 text-[11px] font-semibold hover:border-court-maroon cursor-pointer"
+                    >
+                      Adv. Priya Sharma
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowAuthModal(false)}
+                    className="px-4 py-2 rounded-xl text-slate-600 text-xs font-semibold hover:bg-slate-100 cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={authLoading}
+                    className="px-5 py-2 rounded-xl bg-gradient-to-r from-court-maroon to-rose-700 text-white text-xs font-bold hover:from-rose-700 hover:to-rose-800 transition-all flex items-center gap-1.5 cursor-pointer shadow-md"
+                  >
+                    {authLoading && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
+                    <span>Sign In</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
       </div>
     </div>
   );
