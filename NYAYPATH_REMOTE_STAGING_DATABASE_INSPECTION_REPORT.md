@@ -16,8 +16,8 @@ A comprehensive read-only inspection of the remote Supabase project `dbwojjxfhnm
 3. **Environment Designation:** Cannot be verified as staging from local configuration or public API metadata alone. Classified as **`REQUIRES MANUAL REVIEW`**.
 4. **Credential Availability:** Remote database direct connection credentials (`SUPABASE_DB_PASSWORD`) and Management API access credentials (`SUPABASE_ACCESS_TOKEN`) are not provisioned in the local environment. Classified as **`BLOCKED — CREDENTIALS UNAVAILABLE`**.
 5. **Local Migration State:** All 11 canonical migrations are present locally, have been re-verified via a clean `npx supabase db reset --no-seed`, and yield an exact public catalog of **25 base tables, 1 view (`verified_lawyers`), 1 exclusion constraint (`exclude_overlapping_confirmed_meetings`), and 2 private storage buckets (`case-documents`, `message-attachments`)**.
-6. **Remote Schema State:** Public HTTP/REST probes confirm that the remote project currently exposes **0 public application tables** (`definitions: {}` in OpenAPI), indicating that canonical migrations are **`NOT APPLIED`** remotely.
-7. **Authorization Architecture:** Empirical tests confirm that `public.cases` purposefully has zero table-level grants to untrusted roles (`anon`, `authenticated`), returning HTTP 403 (PostgreSQL error 42501) on direct PostgREST calls. Application-layer ownership and role authorization are strictly enforced by the FastAPI backend.
+6. **Remote Schema State:** Public HTTP/REST probes confirm that the remote project currently exposes **0 public application tables** in PostgREST OpenAPI (`definitions: {}`). However, an empty OpenAPI document only establishes that application objects are not exposed through PostgREST; it does not prove physical absence of tables or unapplied migrations. Until direct database inspection is completed, remote migration history is classified as **`BLOCKED — CREDENTIALS UNAVAILABLE`**, remote physical schema is classified as **`UNKNOWN — DIRECT CATALOG INSPECTION REQUIRED`**, and PostgREST exposed objects is classified as **`NONE OBSERVED IN OPENAPI DOCUMENT`**.
+7. **Authorization Architecture:** Empirical tests confirm that `public.cases` purposefully has zero table-level grants to untrusted roles (`anon`, `authenticated`), returning HTTP 403 / 401 (PostgreSQL error 42501: `permission denied for table cases`) on direct PostgREST calls for owner, non-owner, and anonymous users alike. Application-layer ownership and role authorization are strictly enforced by the FastAPI backend.
 
 ---
 
@@ -150,21 +150,22 @@ Comparing the 11 local migrations against the remote project status:
 
 | # | Local Canonical Migration | Remote Status |
 |---|---|---|
-| 1 | `20261031000001_create_campus_cases.sql` | **NOT APPLIED** |
-| 2 | `20261031000002_security_remediation.sql` | **NOT APPLIED** |
-| 3 | `20261031000003_rate_limit_security_fix.sql` | **NOT APPLIED** |
-| 4 | `20261031000004_core_platform_schema.sql` | **NOT APPLIED** |
-| 5 | `20261101000001_notifications_schema.sql` | **NOT APPLIED** |
-| 6 | `20261101000002_notifications_hardening.sql` | **NOT APPLIED** |
-| 7 | `20261101000003_lawyer_connect_schema.sql` | **NOT APPLIED** |
-| 8 | `20261101000004_messaging_and_meetings_schema.sql` | **NOT APPLIED** |
-| 9 | `20261102000001_concurrent_meeting_exclusion.sql` | **NOT APPLIED** |
-| 10 | `20261102000002_platform_admin_schema.sql` | **NOT APPLIED** |
-| 11 | `20261102000003_verified_lawyers_and_privilege_hardening.sql` | **NOT APPLIED** |
+| 1 | `20261031000001_create_campus_cases.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 2 | `20261031000002_security_remediation.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 3 | `20261031000003_rate_limit_security_fix.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 4 | `20261031000004_core_platform_schema.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 5 | `20261101000001_notifications_schema.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 6 | `20261101000002_notifications_hardening.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 7 | `20261101000003_lawyer_connect_schema.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 8 | `20261101000004_messaging_and_meetings_schema.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 9 | `20261102000001_concurrent_meeting_exclusion.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 10 | `20261102000002_platform_admin_schema.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
+| 11 | `20261102000003_verified_lawyers_and_privilege_hardening.sql` | **BLOCKED — CREDENTIALS UNAVAILABLE** |
 
-- **Schema Drift:** **`NONE DETECTED`** (Remote public schema is in clean, pristine state).
-- **Missing Local Migrations:** None.
-- **Unmanaged Remote Migrations:** None.
+- **Remote Physical Schema:** **`UNKNOWN — DIRECT CATALOG INSPECTION REQUIRED`**
+- **Remote Migration History:** **`BLOCKED — CREDENTIALS UNAVAILABLE`**
+- **PostgREST Exposed Objects:** **`NONE OBSERVED IN OPENAPI DOCUMENT`**
+- **Schema Drift & Unknown Remote Objects:** **`CANNOT BE DETERMINED WITHOUT PHYSICAL CATALOG ACCESS`**
 
 ---
 
@@ -203,19 +204,19 @@ The NyayPath application relies on two dedicated private Supabase Storage bucket
 
 To ensure total architectural clarity, an empirical verification was conducted to distinguish between direct PostgREST RLS and FastAPI application-layer authorization.
 
-### A. Why Direct PostgREST Returns HTTP 403 (PostgreSQL 42501)
+### A. Why Direct PostgREST Returns HTTP 403 / 401 (PostgreSQL 42501)
 In canonical migration `20261031000004_core_platform_schema.sql` (and reinforced in `20261102000003_verified_lawyers_and_privilege_hardening.sql`), all table-level privileges on sensitive operational tables were deliberately restricted:
 ```sql
-REVOKE ALL ON public.cases FROM anon, authenticated;
-REVOKE ALL ON public.campus_cases FROM anon, authenticated;
-REVOKE ALL ON public.case_activity_logs FROM anon, authenticated;
+REVOKE ALL PRIVILEGES ON public.cases FROM PUBLIC, anon, authenticated;
+REVOKE ALL PRIVILEGES ON public.campus_cases FROM PUBLIC, anon, authenticated;
+REVOKE ALL PRIVILEGES ON public.case_activity_log FROM PUBLIC, anon, authenticated;
 ```
-Because untrusted roles (`anon`, `authenticated`) possess **zero table grants**, any direct call from a client browser or script to PostgREST (`GET /rest/v1/cases`) is terminated immediately at PostgreSQL's privilege boundary with error:
-```
-HTTP 403 Forbidden
-{"code":"42501","message":"permission denied for table cases","hint":"Grant the required privileges to the current role with: GRANT SELECT ON public.cases TO authenticated;"}
-```
-This is an intentional defense-in-depth posture: clients cannot bypass backend validation to read cases via PostgREST.
+Because untrusted roles (`anon`, `authenticated`) possess **zero table grants**, any direct call from a client browser or script to PostgREST (`GET /rest/v1/cases`) is terminated immediately at PostgreSQL's privilege boundary with error code `42501`:
+- **Owner (Token B, authenticated):** HTTP 403 Forbidden (`42501: permission denied for table cases`)
+- **Non-Owner (Token A, authenticated):** HTTP 403 Forbidden (`42501: permission denied for table cases`)
+- **Anonymous User (anon):** HTTP 401 Unauthorized (`42501: permission denied for table cases`)
+
+This is an intentional defense-in-depth posture: clients cannot bypass backend validation to read cases via PostgREST, regardless of whether they own the case.
 
 ### B. How FastAPI Enforces Application-Layer Authorization
 FastAPI connects using service credentials but acts as the authoritative gatekeeper. In `api/citizen_workspace.py` (`get_case_details`), it enforces:
@@ -223,14 +224,20 @@ FastAPI connects using service credentials but acts as the authoritative gatekee
 2. **Payload Sanitization:** Confidential proctor notes (`proctor_notes`) and secret verification hashes (`tracking_key_hash`, `verification_key_hash`) are stripped before returning data to citizens or advocates.
 
 ### C. Empirical Validation Results (`scratch/test_fastapi_case_auth.py`)
-| Test Step | Action | Endpoint | Actor | Result | Status |
+
+#### Direct PostgREST Access Matrix (`public.cases`)
+| Persona | Auth Header | Endpoint | Result | PostgreSQL Code | Status |
 |---|---|---|---|---|---|
-| **Step 1** | File new grievance case | `POST /api/citizen/cases/file` | User B | HTTP 200 OK (Case `NP-2026-GEN-68E14F`) | **PASSED** |
-| **Step 2** | Retrieve case details | `GET /api/citizen/cases/NP-2026-GEN-68E14F` | User B (Owner) | HTTP 200 OK (Full details, timeline, documents) | **PASSED** |
-| **Step 2b** | Verify response sanitization | Inspection of response body | User B (Owner) | `proctor_notes` and `tracking_key_hash` stripped | **PASSED** |
-| **Step 3** | Attempt unauthorized access | `GET /api/citizen/cases/NP-2026-GEN-68E14F` | User A (Non-owner) | **HTTP 403 Forbidden** (`Access denied`) | **PASSED** |
-| **Step 4** | Attempt unauthenticated access | `GET /api/citizen/cases/NP-2026-GEN-68E14F` | Anonymous | **HTTP 401 Unauthorized** | **PASSED** |
-| **Step 5** | Direct PostgREST query | `GET /rest/v1/cases?case_id=eq...` | User B (Token B) | **HTTP 403 Forbidden** (Postgres 42501) | **PASSED** |
+| **Case Owner** | Bearer Token B (`authenticated`) | `GET /rest/v1/cases?case_id=eq...` | **HTTP 403 Forbidden** | `42501` (`permission denied for table cases`) | **VERIFIED** |
+| **Non-Owner** | Bearer Token A (`authenticated`) | `GET /rest/v1/cases?case_id=eq...` | **HTTP 403 Forbidden** | `42501` (`permission denied for table cases`) | **VERIFIED** |
+| **Anonymous User** | None (`anon` apikey only) | `GET /rest/v1/cases?case_id=eq...` | **HTTP 401 Unauthorized** | `42501` (`permission denied for table cases`) | **VERIFIED** |
+
+#### FastAPI Application-Layer Authorization Matrix
+| Persona | Auth Header | Endpoint | Result | Data Delivered | Status |
+|---|---|---|---|---|---|
+| **Case Owner** | Bearer Token B | `GET /api/citizen/cases/{case_id}` | **HTTP 200 OK** | Full case details, timeline, documents (sanitized) | **VERIFIED** |
+| **Non-Owner** | Bearer Token A | `GET /api/citizen/cases/{case_id}` | **HTTP 403 Forbidden** | Access denied ("You do not have permission to view this case") | **VERIFIED** |
+| **Anonymous User** | None | `GET /api/citizen/cases/{case_id}` | **HTTP 401 Unauthorized** | Missing or invalid authentication token | **VERIFIED** |
 
 ### D. Architectural Clarification on Payload Encryption
 - **Application-Layer Integrity:** Grievance verification hashes are generated via HMAC-SHA256 using server-held `CASE_TRACKING_HMAC_KEY`.
@@ -248,7 +255,7 @@ An audit of all 11 canonical migrations indicates the following DDL characterist
 - **Order-Dependent Migrations (2/11):**
   - Migration 6 (`20261101000002_notifications_hardening.sql`): Adds check constraints and alters columns without `IF NOT EXISTS`.
   - Migration 11 (`20261102000003_verified_lawyers_and_privilege_hardening.sql`): Creates `verified_lawyers` view with `security_invoker = true` and revokes public privileges.
-- **Conflict Assessment:** Because the remote public schema is clean and unmigrated, applying migrations 1 through 11 in sequential order will proceed smoothly without collision.
+- **Conflict Assessment:** Potential migration conflicts cannot be definitively evaluated without direct catalog inspection of the physical PostgreSQL database on the remote project. While local replay is conflict-free, remote compatibility remains unverified until credentials are provided and catalog inspection is performed.
 
 ---
 
@@ -305,3 +312,4 @@ curl.exe -s "https://dbwojjxfhnmmwrnqxyqj.supabase.co/storage/v1/bucket"
 **Total DDL Statements Issued:** `0`  
 **Total DML Statements Issued:** `0`  
 **Destructive CLI Commands Executed:** `0`
+
