@@ -140,16 +140,16 @@ When setting up the project in the Vercel Dashboard for Staging, enter the follo
 
 ---
 
-## 6. Phase 5 — Migration 12 Gating Status
+## 6. Phase 5 — Migration 12 Staging Status
 
-- **Local Database:** Migration 12 (`supabase/migrations/20261103000001_legal_drafts_schema.sql`) is applied and 100% verified with timestamps (`DEFAULT now()`), RLS policies, and cross-user isolation tests.
-- **Staging Database (`chhbftpggjgcjqstgfqc`):** Currently pristine at the approved 11-migration baseline.
-- **Safety Rule:** In accordance with explicit instructions, **Migration 12 was NOT applied to the remote staging project**.
-- **Expo Demo Note:** When ready to enable persistent legal drafts on staging, run:
-  ```powershell
-  npx supabase db push --db-url "$env:STAGING_DATABASE_URL"
-  ```
-  *(Requires user confirmation beforehand).*
+- **Local Database:** Migration 12 (`supabase/migrations/20261103000001_legal_drafts_schema.sql`) applied and 100% verified.
+- **Staging Database (`chhbftpggjgcjqstgfqc`):** Migration 12 applied on November 3, 2026 following explicit user authorization. Remote database catalog inspection and live transactional tests confirmed:
+  - `public.legal_drafts` table created with 14 columns.
+  - Foreign key `user_id REFERENCES auth.users(id)` active.
+  - RLS enabled with permissive `Users can manage own legal drafts` policy (`user_id = auth.uid()`).
+  - Trigger `trg_legal_drafts_updated_at` firing `private.set_updated_at_timestamp()`.
+  - 4 indexes (`legal_drafts_pkey`, `idx_legal_drafts_user`, `idx_legal_drafts_case`, `idx_legal_drafts_status`) active.
+- **Production Status:** `dbwojjxfhnmmwrnqxyqj` remains completely untouched (zero connections).
 
 ---
 
@@ -194,3 +194,4 @@ To deploy this verified build to Vercel Preview for the college expo:
    - Copy the staging environment variables from **Section 5** above into the Vercel project settings.
 5. **Deploy:** Click **Deploy**. Vercel will install npm and pip dependencies, compile Next.js pages, and deploy the serverless Python functions automatically.
 6. **Expo Presentation:** Once deployment finishes, the Vercel Preview URL (e.g., `https://nyaypath-git-expo-demo-ishan1120s-projects.vercel.app`) is ready for live presentation!
+
