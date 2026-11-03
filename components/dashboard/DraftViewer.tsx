@@ -299,11 +299,16 @@ export default function DraftViewer({
       }
     }
 
+    let cleanCaseId = caseId && typeof caseId === 'string' ? caseId.trim() : undefined;
+    if (cleanCaseId && (cleanCaseId.startsWith('CR-GRV') || cleanCaseId.startsWith('DRAFT'))) {
+      cleanCaseId = undefined;
+    }
+
     setConsultationSubmitting(true);
     try {
       await requestConsultation({
         lawyer_user_id: selectedLawyer.id,
-        case_id: caseId || undefined,
+        case_id: cleanCaseId,
         legal_issue: consultationForm.legal_issue,
         description: consultationForm.description,
         preferred_mode: consultationForm.preferred_mode,

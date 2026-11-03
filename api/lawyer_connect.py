@@ -432,12 +432,38 @@ class LawyerConnectManager:
                     camp_res = self.supabase.table("campus_cases").select("student_user_id").eq("case_id", clean_case_id).execute()
                     if camp_res.data:
                         owner_uid = camp_res.data[0].get("student_user_id")
+
+                if not owner_uid:
+                    # Case was created during anonymous intake flow prior to login.
+                    # Authoritatively claim and attribute the case to the authenticated citizen.
+                    owner_uid = str(citizen_user.user_id)
+                    try:
+                        cdata["citizen_user_id"] = str(citizen_user.user_id)
+                        cdata["user_id"] = str(citizen_user.user_id)
+                        self.supabase.table("cases").update({
+                            "data": cdata,
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        }).eq("id", c_rec.get("id")).execute()
+                    except Exception as claim_err:
+                        logger.warning(f"Failed to claim unowned case {clean_case_id}: {claim_err}")
+
                 if str(owner_uid).lower() != str(citizen_user.user_id).lower():
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Access denied: You can only link cases owned by your account."
-                    )
-                case_uuid = c_rec.get("id")
+                    if payload.include_draft and payload.draft_id:
+                        # Mismatched case_id from stale browser session, but citizen is sharing their own draft.
+                        # Disassociate foreign case_id so the draft consultation succeeds cleanly.
+                        logger.warning(
+                            f"Disassociating foreign case_id {clean_case_id} (owner {owner_uid}) "
+                            f"from citizen {citizen_user.user_id}'s draft consultation."
+                        )
+                        case_uuid = None
+                        payload.case_id = None
+                    else:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Access denied: You can only link cases owned by your account."
+                        )
+                else:
+                    case_uuid = c_rec.get("id")
 
         # Prevent duplicate pending consultation requests on repeated clicks
         try:

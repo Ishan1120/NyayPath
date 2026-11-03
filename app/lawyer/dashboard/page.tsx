@@ -942,7 +942,7 @@ export default function LawyerDashboardPage() {
                       type="button"
                       onClick={() => {
                         setAuthEmail('advocate.rajesh@bar.in');
-                        setAuthPassword('ProctorPass@2026!');
+                        setAuthPassword('');
                       }}
                       className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800 text-[11px] font-semibold hover:border-court-maroon cursor-pointer"
                     >
@@ -952,7 +952,7 @@ export default function LawyerDashboardPage() {
                       type="button"
                       onClick={() => {
                         setAuthEmail('advocate.priya@bar.in');
-                        setAuthPassword('ProctorPass@2026!');
+                        setAuthPassword('');
                       }}
                       className="px-2.5 py-1 rounded-lg bg-white border border-slate-200 text-slate-800 text-[11px] font-semibold hover:border-court-maroon cursor-pointer"
                     >
